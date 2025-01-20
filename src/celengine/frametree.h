@@ -10,24 +10,23 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_FRAMETREE_H_
-#define _CELENGINE_FRAMETREE_H_
+#pragma once
 
 #include <memory>
 #include <vector>
-#include <cstddef>
-#include "frame.h"
-#include "timelinephase.h"
 
+#include "body.h"
+
+class ReferenceFrame;
 class Star;
-class Body;
+class TimelinePhase;
 
-class FrameTree
+class FrameTree //NOSONAR
 {
 public:
-    FrameTree(Star*);
-    FrameTree(Body*);
-    ~FrameTree() = default;
+    explicit FrameTree(Star*);
+    explicit FrameTree(Body*);
+    ~FrameTree();
 
     /*! Return the star that this tree is associated with; it will be
      *  nullptr for frame trees associated with solar system bodies.
@@ -37,11 +36,11 @@ public:
         return starParent;
     }
 
-    const ReferenceFrame::SharedConstPtr &getDefaultReferenceFrame() const;
+    const std::shared_ptr<const ReferenceFrame>& getDefaultReferenceFrame() const;
 
-    void addChild(const TimelinePhase::SharedConstPtr &phase);
-    void removeChild(const TimelinePhase::SharedConstPtr &phase);
-    const TimelinePhase::SharedConstPtr &getChild(unsigned int n) const;
+    void addChild(const std::shared_ptr<const TimelinePhase>& phase);
+    void removeChild(const std::shared_ptr<const TimelinePhase>& phase);
+    const TimelinePhase* getChild(unsigned int n) const;
     unsigned int childCount() const;
 
     void markChanged();
@@ -84,23 +83,21 @@ public:
     /*! Return a bitmask with the classifications of all children
      *  in this tree.
      */
-    int childClassMask() const
+    BodyClassification childClassMask() const
     {
         return m_childClassMask;
     }
 
 private:
-    Star* starParent;
-    Body* bodyParent;
-    std::vector<TimelinePhase::SharedConstPtr> children;
+    Star* starParent{ nullptr };
+    Body* bodyParent{ nullptr };
+    std::vector<std::shared_ptr<const TimelinePhase>> children;
 
     double m_boundingSphereRadius{ 0.0 };
     double m_maxChildRadius{ 0.0 };
     bool m_containsSecondaryIlluminators{ false };
-    bool m_changed{ false };
-    int m_childClassMask{ 0 };
+    bool m_changed{ true };
+    BodyClassification m_childClassMask{ BodyClassification::EmptyMask };
 
-    ReferenceFrame::SharedConstPtr defaultFrame;
+    std::shared_ptr<const ReferenceFrame> defaultFrame;
 };
-
-#endif // _CELENGINE_FRAMETREE_H_

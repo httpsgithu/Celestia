@@ -12,20 +12,23 @@
 // of the License, or (at your option) any later version.
 
 #include "rotation.h"
-#include <celmath/geomutil.h>
-#include <celmath/mathlib.h>
+
 #include <cmath>
 
-using namespace Eigen;
-using namespace std;
-using namespace celmath;
+#include <celcompat/numbers.h>
+#include <celmath/geomutil.h>
 
+namespace celestia::ephem
+{
 
-static const double ANGULAR_VELOCITY_DIFF_DELTA = 1.0 / 1440.0;
+namespace
+{
+
+constexpr double ANGULAR_VELOCITY_DIFF_DELTA = 1.0 / 1440.0;
 
 // Choose a time interval for numerically differentiating orientation
 // to get the angular velocity for a rotation model.
-static double chooseDiffTimeDelta(const RotationModel& rm)
+double chooseDiffTimeDelta(const RotationModel& rm)
 {
     if (rm.isPeriodic())
         return rm.getPeriod() / 10000.0;
@@ -33,23 +36,25 @@ static double chooseDiffTimeDelta(const RotationModel& rm)
     return ANGULAR_VELOCITY_DIFF_DELTA;
 }
 
+} // end unnamed namepsace
+
 /***** RotationModel *****/
 
 /*! Return the angular velocity at the specified time (TDB). The default
  *  implementation computes the angular velocity via differentiation.
  */
-Vector3d
+Eigen::Vector3d
 RotationModel::angularVelocityAtTime(double tdb) const
 {
     double dt = chooseDiffTimeDelta(*this);
-    Quaterniond q0 = orientationAtTime(tdb);
-    Quaterniond q1 = orientationAtTime(tdb + dt);
-    Quaterniond dq = q1.conjugate() * q0;
+    Eigen::Quaterniond q0 = orientationAtTime(tdb);
+    Eigen::Quaterniond q1 = orientationAtTime(tdb + dt);
+    Eigen::Quaterniond dq = q1.conjugate() * q0;
 
     if (std::abs(dq.w()) > 0.99999999)
-        return Vector3d::Zero();
+        return Eigen::Vector3d::Zero();
 
-    return dq.vec().normalized() * (2.0 * acos(dq.w()) / dt);
+    return dq.vec().normalized() * (2.0 * std::acos(dq.w()) / dt);
 }
 
 
@@ -64,7 +69,7 @@ CachingRotationModel::CachingRotationModel() :
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 CachingRotationModel::spin(double tjd) const
 {
     if (tjd != lastTime)
@@ -85,7 +90,7 @@ CachingRotationModel::spin(double tjd) const
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 CachingRotationModel::equatorOrientationAtTime(double tjd) const
 {
     if (tjd != lastTime)
@@ -106,7 +111,7 @@ CachingRotationModel::equatorOrientationAtTime(double tjd) const
 }
 
 
-Vector3d
+Eigen::Vector3d
 CachingRotationModel::angularVelocityAtTime(double tjd) const
 {
     if (tjd != lastTime)
@@ -127,47 +132,51 @@ CachingRotationModel::angularVelocityAtTime(double tjd) const
 }
 
 
-Vector3d
+Eigen::Vector3d
 CachingRotationModel::computeAngularVelocity(double tjd) const
 {
     double dt = chooseDiffTimeDelta(*this);
-    Quaterniond q0 = orientationAtTime(tjd);
+    Eigen::Quaterniond q0 = orientationAtTime(tjd);
 
     // Call computeSpin/computeEquatorOrientation instead of orientationAtTime
     // in order to avoid affecting the cache.
-    Quaterniond spin = computeSpin(tjd + dt);
-    Quaterniond equator = computeEquatorOrientation(tjd + dt);
-    Quaterniond q1 = spin * equator;
-    Quaterniond dq = q1.conjugate() * q0;
+    Eigen::Quaterniond spin = computeSpin(tjd + dt);
+    Eigen::Quaterniond equator = computeEquatorOrientation(tjd + dt);
+    Eigen::Quaterniond q1 = spin * equator;
+    Eigen::Quaterniond dq = q1.conjugate() * q0;
 
     if (std::abs(dq.w()) > 0.99999999)
-        return Vector3d::Zero();
+        return Eigen::Vector3d::Zero();
 
-    return dq.vec().normalized() * (2.0 * acos(dq.w()) / dt);
+    return dq.vec().normalized() * (2.0 * std::acos(dq.w()) / dt);
 }
 
 
 /***** ConstantOrientation implementation *****/
 
-ConstantOrientation::ConstantOrientation(const Quaterniond& q) :
+ConstantOrientation::ConstantOrientation(const Eigen::Quaterniond& q) :
     orientation(q)
 {
 }
 
-
-Quaterniond
+Eigen::Quaterniond
 ConstantOrientation::spin(double /*unused*/) const
 {
     return orientation;
 }
 
-
-Vector3d
+Eigen::Vector3d
 ConstantOrientation::angularVelocityAtTime(double /* tdb */) const
 {
-    return Vector3d::Zero();
+    return Eigen::Vector3d::Zero();
 }
 
+std::shared_ptr<const RotationModel>
+ConstantOrientation::identity()
+{
+    static auto identity = std::make_shared<ConstantOrientation>();
+    return identity;
+}
 
 /***** UniformRotationModel implementation *****/
 
@@ -199,11 +208,11 @@ UniformRotationModel::getPeriod() const
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 UniformRotationModel::spin(double tjd) const
 {
     double rotations = (tjd - epoch) / period;
-    double wholeRotations = floor(rotations);
+    double wholeRotations = std::floor(rotations);
     double remainder = rotations - wholeRotations;
 
     // TODO: This is the wrong place for this offset
@@ -212,22 +221,23 @@ UniformRotationModel::spin(double tjd) const
     // the texture.
     remainder += 0.5;
 
-    return YRotation(-remainder * 2 * PI - offset);
+    return math::YRotation(-remainder * 2 * celestia::numbers::pi - offset);
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 UniformRotationModel::equatorOrientationAtTime(double /*unused*/) const
 {
-    return XRotation((double) -inclination) * YRotation((double) -ascendingNode);
+    return math::XRotation((double) -inclination) *
+           math::YRotation((double) -ascendingNode);
 }
 
 
-Vector3d
+Eigen::Vector3d
 UniformRotationModel::angularVelocityAtTime(double tdb) const
 {
-    Vector3d v = equatorOrientationAtTime(tdb).conjugate() * Vector3d::UnitY();;
-    return v * (2.0 * PI / period);
+    Eigen::Vector3d v = equatorOrientationAtTime(tdb).conjugate() * Eigen::Vector3d::UnitY();
+    return v * (2.0 * celestia::numbers::pi / period);
 }
 
 
@@ -263,11 +273,11 @@ PrecessingRotationModel::getPeriod() const
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 PrecessingRotationModel::spin(double tjd) const
 {
     double rotations = (tjd - epoch) / period;
-    double wholeRotations = floor(rotations);
+    double wholeRotations = std::floor(rotations);
     double remainder = rotations - wholeRotations;
 
     // TODO: This is the wrong place for this offset
@@ -276,11 +286,11 @@ PrecessingRotationModel::spin(double tjd) const
     // the texture.
     remainder += 0.5;
 
-    return YRotation(-remainder * 2 * PI - offset);
+    return math::YRotation(-remainder * 2 * celestia::numbers::pi - offset);
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 PrecessingRotationModel::equatorOrientationAtTime(double tjd) const
 {
     double nodeOfDate;
@@ -293,9 +303,10 @@ PrecessingRotationModel::equatorOrientationAtTime(double tjd) const
     else
     {
         nodeOfDate = (double) ascendingNode -
-            (2.0 * PI / precessionPeriod) * (tjd - epoch);
+            (2.0 * celestia::numbers::pi / precessionPeriod) * (tjd - epoch);
     }
 
-    return XRotation((double) -inclination) * YRotation(-nodeOfDate);
+    return math::XRotation((double) -inclination) * math::YRotation(-nodeOfDate);
 }
 
+} // end namespace celestia::ephem

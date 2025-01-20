@@ -10,54 +10,33 @@
 
 #pragma once
 
-#include <Eigen/Core>
+#include <cstdint>
+
 #include "octree.h"
 
-#ifdef USE_GLCONTEXT
-class GLContext;
-#endif
 class Observer;
 class Renderer;
 
-template <class OBJ, class PREC> class ObjectRenderer : public OctreeProcessor<OBJ, PREC>
+template<class OBJ, class PREC>
+class ObjectRenderer : public celestia::engine::OctreeProcessor<OBJ, PREC>
 {
- public:
-    ObjectRenderer(PREC _distanceLimit) : distanceLimit((float) _distanceLimit) {};
-    void process(const OBJ& /*unused*/, PREC /*unused*/, float /*unused*/) {};
-
+public:
     const Observer* observer    { nullptr };
-#ifdef USE_GLCONTEXT
-    GLContext* context          { nullptr };
-#endif
     Renderer*  renderer         { nullptr };
 
-    Eigen::Vector3f viewNormal;
-
-    float fov                   { 0.0f };
-    float size                  { 0.0f };
     float pixelSize             { 0.0f };
     float faintestMag           { 0.0f };
-    float faintestMagNight      { 0.0f };
-    float saturationMag         { 0.0f };
-#ifdef USE_HDR
-    float exposure              { 0.0f };
-#endif
-    float brightnessScale       { 0.0f };
-    float brightnessBias        { 0.0f };
     float distanceLimit         { 0.0f };
 
     // Objects brighter than labelThresholdMag will be labeled
     float labelThresholdMag     { 0.0f };
 
-    // These are not fully used by this template's descendants
-    // but we place them here just in case a more sophisticated
-    // rendering scheme is implemented:
-    int nRendered               { 0 };
-    int nClose                  { 0 };
-    int nBright                 { 0 };
-    int nProcessed              { 0 };
-    int nLabelled               { 0 };
-
-    uint64_t renderFlags        { 0 };
+    std::uint64_t renderFlags   { 0 };
     int labelMode               { 0 };
+
+protected:
+    explicit ObjectRenderer(PREC _distanceLimit) :
+        distanceLimit(static_cast<float>(_distanceLimit))
+    {
+    }
 };

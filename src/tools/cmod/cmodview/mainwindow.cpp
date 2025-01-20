@@ -9,35 +9,62 @@
 // of the License, or (at your option) any later version.
 
 #include "mainwindow.h"
-#include "materialwidget.h"
+
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <utility>
+
+#include <QActionGroup>
+#include <QColor>
+#include <QColorDialog>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
+#include <QDockWidget>
+#include <QDoubleValidator>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFileOpenEvent>
+#include <QFormLayout>
+#include <QKeySequence>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QSetIterator>
+#include <QSettings>
+#include <QStatusBar>
+#include <QVBoxLayout>
+
+#include <cel3ds/3dsmodel.h>
+#include <cel3ds/3dsread.h>
+#include <celmath/mathlib.h>
+#include <celmodel/material.h>
+#include <celmodel/mesh.h>
+#include <celmodel/model.h>
+#include <celmodel/modelfile.h>
+
+#include "cmodops.h"
 #include "convert3ds.h"
 #include "convertobj.h"
-#include "cmodops.h"
-#include <cel3ds/3dsread.h>
-#include <celmodel/modelfile.h>
-#include <QStatusBar>
-#include <QMenuBar>
-#include <QSettings>
-#include <QDockWidget>
-#include <QEvent>
-#include <QMessageBox>
-#include <QCloseEvent>
-#include <QFileOpenEvent>
-#include <QFileInfo>
-#include <QVBoxLayout>
-#include <QDialogButtonBox>
-#include <QColorDialog>
-#include <QDir>
-#include <QFileDialog>
-#include <QFormLayout>
+#include "pathmanager.h"
 
-using namespace cmod;
-using namespace std;
+#include "materialwidget.h"
+#include "modelviewwidget.h"
 
+namespace math = celestia::math;
 
+namespace cmodview
+{
+
+namespace
+{
 // Version number for saving/restoring widget layout state. Increment this
 // value whenever new tool widgets are added or removed.
-static const int CMODVIEW_STATE_VERSION = 1;
+constexpr int CMODVIEW_STATE_VERSION = 1;
+
+} // end unnamed namespace
 
 
 MainWindow::MainWindow() :
@@ -45,8 +72,7 @@ MainWindow::MainWindow() :
     m_materialWidget(nullptr),
     m_statusBarLabel(nullptr),
     m_saveAction(nullptr),
-    m_saveAsAction(nullptr),
-    m_gl2Action(nullptr)
+    m_saveAsAction(nullptr)
 {
     m_modelView = new ModelViewWidget(this);
     m_statusBarLabel = new QLabel(this);
@@ -81,14 +107,6 @@ MainWindow::MainWindow() :
     QAction* wireFrameStyleAction = new QAction(tr("&Wireframe"), styleGroup);
     wireFrameStyleAction->setCheckable(true);
     wireFrameStyleAction->setData((int) ModelViewWidget::WireFrameStyle);
-    QActionGroup* renderPathGroup = new QActionGroup(styleMenu);
-    QAction* fixedFunctionAction = new QAction(tr("Fixed Function"), renderPathGroup);
-    fixedFunctionAction->setCheckable(true);
-    fixedFunctionAction->setChecked(true);
-    fixedFunctionAction->setData((int) ModelViewWidget::FixedFunctionPath);
-    m_gl2Action = new QAction(tr("OpenGL 2.0"), renderPathGroup);
-    m_gl2Action->setCheckable(true);
-    m_gl2Action->setData((int) ModelViewWidget::OpenGL2Path);
     QAction* backgroundColorAction = new QAction(tr("&Background Color..."), this);
     QAction* ambientLightAction = new QAction(tr("&Ambient Light"), this);
     ambientLightAction->setCheckable(true);
@@ -98,9 +116,6 @@ MainWindow::MainWindow() :
 
     styleMenu->addAction(normalStyleAction);
     styleMenu->addAction(wireFrameStyleAction);
-    styleMenu->addSeparator();
-    styleMenu->addAction(fixedFunctionAction);
-    styleMenu->addAction(m_gl2Action);
     styleMenu->addSeparator();
     styleMenu->addAction(ambientLightAction);
     styleMenu->addAction(shadowsAction);
@@ -141,7 +156,6 @@ MainWindow::MainWindow() :
 
     // Connect Style menu
     connect(styleGroup, SIGNAL(triggered(QAction*)), this, SLOT(setRenderStyle(QAction*)));
-    connect(renderPathGroup, SIGNAL(triggered(QAction*)), this, SLOT(setRenderPath(QAction*)));
     connect(backgroundColorAction, SIGNAL(triggered()), this, SLOT(editBackgroundColor()));
     connect(ambientLightAction, SIGNAL(toggled(bool)), m_modelView, SLOT(setAmbientLight(bool)));
     connect(shadowsAction, SIGNAL(toggled(bool)), m_modelView, SLOT(setShadows(bool)));
@@ -168,8 +182,6 @@ MainWindow::MainWindow() :
     connect(m_modelView, SIGNAL(selectionChanged()), this, SLOT(updateSelectionInfo()));
     connect(m_materialWidget, SIGNAL(materialEdited(const cmod::Material&)), this, SLOT(changeCurrentMaterial(const cmod::Material&)));
     toolsMenu->addAction(materialDock->toggleViewAction());
-
-    connect(m_modelView, SIGNAL(contextCreated()), this, SLOT(initializeGL()));
 }
 
 
@@ -196,43 +208,6 @@ void MainWindow::closeEvent(QCloseEvent* event)
 }
 
 
-// Initialization that occurs only after an OpenGL context has been created
-void MainWindow::initializeGL()
-{
-    // Enable the GL2 path by default if OpenGL 2.0 shaders are available
-    if (GLShaderProgram::hasOpenGLShaderPrograms())
-    {
-        m_gl2Action->setChecked(true);
-        m_modelView->setRenderPath(ModelViewWidget::OpenGL2Path);
-    }
-    else
-    {
-        m_gl2Action->setEnabled(false);
-    }
-}
-
-static Material*
-cloneMaterial(const Material* other)
-{
-    Material* material = new Material();
-    material->diffuse  = other->diffuse;
-    material->specular = other->specular;
-    material->emissive = other->emissive;
-    material->specularPower = other->specularPower;
-    material->opacity  = other->opacity;
-    material->blend    = other->blend;
-    for (int i = 0; i < Material::TextureSemanticMax; ++i)
-    {
-        if (other->maps[i])
-        {
-            material->maps[i] = new Material::DefaultTextureResource(other->maps[i]->source());
-        }
-    }
-
-    return material;
-}
-
-
 bool
 MainWindow::eventFilter(QObject* obj, QEvent* e)
 {
@@ -241,13 +216,8 @@ MainWindow::eventFilter(QObject* obj, QEvent* e)
         // Handle open file events from the desktop. Currently, these
         // are only sent on Mac OS X.
         QFileOpenEvent *fileOpenEvent = dynamic_cast<QFileOpenEvent*>(e);
-        if (fileOpenEvent)
-        {
-            if (!fileOpenEvent->file().isEmpty())
-            {
-                openModel(fileOpenEvent->file());
-            }
-        }
+        if (fileOpenEvent != nullptr && !fileOpenEvent->file().isEmpty())
+            openModel(fileOpenEvent->file());
 
         return true;
     }
@@ -257,18 +227,16 @@ MainWindow::eventFilter(QObject* obj, QEvent* e)
 
 
 void
-MainWindow::setModel(const QString& fileName, Model* model)
+MainWindow::setModel(const QString& fileName, std::unique_ptr<cmod::Model>&& model)
 {
     QFileInfo info(fileName);
     QString modelDir = info.absoluteDir().path();
-    m_modelView->setModel(model, modelDir);
+    m_modelView->setModel(std::move(model), modelDir);
 
     // Only reset the camera when we've loaded a new model. Leaving
     // the camera fixed allows to see model changes more easily.
     if (fileName != modelFileName())
-    {
         m_modelView->resetCamera();
-    }
 
     m_materialWidget->setTextureSearchPath(modelDir);
 
@@ -280,7 +248,7 @@ MainWindow::setModel(const QString& fileName, Model* model)
 void
 MainWindow::showModelStatistics()
 {
-    Model* model = m_modelView->model();
+    const cmod::Model* model = m_modelView->model();
     if (model)
     {
         // Count triangles and vertices in the mesh
@@ -288,19 +256,19 @@ MainWindow::showModelStatistics()
         unsigned int triangleCount = 0;
         for (unsigned int meshIndex = 0; meshIndex < model->getMeshCount(); ++meshIndex)
         {
-            const Mesh* mesh = model->getMesh(meshIndex);
+            const cmod::Mesh* mesh = model->getMesh(meshIndex);
             vertexCount += mesh->getVertexCount();
             for (unsigned int groupIndex = 0; groupIndex < mesh->getGroupCount(); ++groupIndex)
             {
-                const Mesh::PrimitiveGroup* group = mesh->getGroup(groupIndex);
+                const cmod::PrimitiveGroup* group = mesh->getGroup(groupIndex);
                 switch (group->prim)
                 {
-                case Mesh::TriList:
-                    triangleCount += group->nIndices / 3;
+                case cmod::PrimitiveGroupType::TriList:
+                    triangleCount += group->indices.size() / 3;
                     break;
-                case Mesh::TriFan:
-                case Mesh::TriStrip:
-                    triangleCount += group->nIndices - 2;
+                case cmod::PrimitiveGroupType::TriFan:
+                case cmod::PrimitiveGroupType::TriStrip:
+                    triangleCount += group->indices.size() - 2;
                     break;
                 default:
                     break;
@@ -346,7 +314,6 @@ bool
 MainWindow::exportSupported(const QString& fileName) const
 {
     QString ext = QFileInfo(fileName).suffix().toLower();
-
     return ext == "cmod";
 }
 
@@ -376,64 +343,64 @@ MainWindow::openModel(const QString& fileName)
 {
     if (!fileName.isEmpty())
     {
-        string fileNameStd = string(fileName.toUtf8().data());
+        std::string fileNameStd = std::string(fileName.toUtf8().data());
 
         QFileInfo info(fileName);
+        cmodtools::GetPathManager()->reset();
 
         if (info.suffix().toLower() == "3ds")
         {
-            M3DScene* scene = Read3DSFile(fileNameStd);
+            std::unique_ptr<M3DScene> scene = Read3DSFile(fileNameStd);
             if (scene == nullptr)
             {
                 QMessageBox::warning(this, "Load error", tr("Error reading 3DS file %1").arg(fileName));
                 return;
             }
 
-            Model* model = Convert3DSModel(*scene);
+            auto model = cmodtools::Convert3DSModel(*scene, cmodtools::GetPathManager()->getHandle);
             if (model == nullptr)
             {
                 QMessageBox::warning(this, "Load error", tr("Internal error converting 3DS file %1").arg(fileName));
                 return;
             }
 
-            delete scene;
-
             // Generate normals for the model
-            double smoothAngle = 45.0; // degrees
+            float smoothAngle = 45.0; // degrees
             double weldTolerance = 1.0e-6;
             bool weldVertices = true;
 
-            Model* newModel = GenerateModelNormals(*model, float(smoothAngle * 3.14159265 / 180.0), weldVertices, weldTolerance);
-            delete model;
+            model = cmodtools::GenerateModelNormals(*model,
+                                                    math::degToRad(smoothAngle),
+                                                    weldVertices,
+                                                    weldTolerance);
 
-            if (!newModel)
+            if (!model)
             {
                 QMessageBox::warning(this, tr("Mesh Load Error"), tr("Internal error when loading mesh"));
             }
             else
             {
                 // Automatically uniquify vertices
-                for (unsigned int i = 0; newModel->getMesh(i) != nullptr; i++)
+                for (unsigned int i = 0; model->getMesh(i) != nullptr; i++)
                 {
-                    Mesh* mesh = newModel->getMesh(i);
-                    UniquifyVertices(*mesh);
+                    cmod::Mesh* mesh = model->getMesh(i);
+                    cmodtools::UniquifyVertices(*mesh);
                 }
 
-                setModel(fileName, newModel);
+                setModel(fileName, std::move(model));
             }
         }
         else if (info.suffix().toLower() == "obj")
         {
-            Model* model = nullptr;
-            ifstream in(fileNameStd, ios::in | ios::binary);
+            std::ifstream in(fileNameStd, std::ios::in | std::ios::binary);
             if (!in.good())
             {
                 QMessageBox::warning(this, "Load error", tr("Error opening obj file %1").arg(fileName));
                 return;
             }
 
-            WavefrontLoader loader(in);
-            model = loader.load();
+            cmodtools::WavefrontLoader loader(in);
+            std::unique_ptr<cmod::Model> model = loader.load();
 
             if (model == nullptr)
             {
@@ -444,30 +411,29 @@ MainWindow::openModel(const QString& fileName)
             // Automatically uniquify vertices
             for (unsigned int i = 0; model->getMesh(i) != nullptr; i++)
             {
-                Mesh* mesh = model->getMesh(i);
-                UniquifyVertices(*mesh);
+                cmod::Mesh* mesh = model->getMesh(i);
+                cmodtools::UniquifyVertices(*mesh);
             }
 
-            setModel(fileName, model);
+            setModel(fileName, std::move(model));
         }
         else if (info.suffix().toLower() == "cmod")
         {
-            Model* model = nullptr;
-            ifstream in(fileNameStd, ios::in | ios::binary);
+            std::ifstream in(fileNameStd, std::ios::in | std::ios::binary);
             if (!in.good())
             {
                 QMessageBox::warning(this, "Load error", tr("Error opening CMOD file %1").arg(fileName));
                 return;
             }
 
-            model = LoadModel(in);
+            std::unique_ptr<cmod::Model> model = cmod::LoadModel(in, cmodtools::GetPathManager()->getHandle);
             if (model == nullptr)
             {
                 QMessageBox::warning(this, "Load error", tr("Error reading CMOD file %1").arg(fileName));
                 return;
             }
 
-            setModel(fileName, model);
+            setModel(fileName, std::move(model));
         }
         else
         {
@@ -481,9 +447,7 @@ void
 MainWindow::saveModel()
 {
     if (exportSupported(modelFileName()))
-    {
         saveModel(modelFileName());
-    }
 }
 
 
@@ -502,14 +466,12 @@ MainWindow::saveModelAs()
 void
 MainWindow::saveModel(const QString& saveFileName)
 {
-    string fileNameStd = string(saveFileName.toUtf8().data());
+    std::string fileNameStd = std::string(saveFileName.toUtf8().data());
 
-    ofstream out(fileNameStd, ios::out | ios::binary);
+    std::ofstream out(fileNameStd, std::ios::out | std::ios::binary);
     bool ok = false;
     if (out.good())
-    {
-        ok = SaveModelBinary(m_modelView->model(), out);
-    }
+        ok = SaveModelBinary(m_modelView->model(), out, cmodtools::GetPathManager()->getSource);
 
     if (!ok)
     {
@@ -543,29 +505,11 @@ MainWindow::setRenderStyle(QAction* action)
 
 
 void
-MainWindow::setRenderPath(QAction* action)
-{
-    ModelViewWidget::RenderPath renderPath = (ModelViewWidget::RenderPath) action->data().toInt();
-    switch (renderPath)
-    {
-    case ModelViewWidget::FixedFunctionPath:
-    case ModelViewWidget::OpenGL2Path:
-        m_modelView->setRenderPath(renderPath);
-        break;
-    default:
-        break;
-    }
-}
-
-
-void
 MainWindow::generateNormals()
 {
-    Model* model = m_modelView->model();
+    const cmod::Model* model = m_modelView->model();
     if (!model)
-    {
         return;
-    }
 
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Generate Surface Normals"));
@@ -601,18 +545,21 @@ MainWindow::generateNormals()
 
     if (dialog.exec() == QDialog::Accepted)
     {
-        double smoothAngle = smoothAngleEdit->text().toDouble();
+        float smoothAngle = smoothAngleEdit->text().toFloat();
         double weldTolerance = toleranceEdit->text().toDouble();
         bool weldVertices = true;
 
-        Model* newModel = GenerateModelNormals(*model, float(smoothAngle * 3.14159265 / 180.0), weldVertices, weldTolerance);
+        auto newModel = cmodtools::GenerateModelNormals(*model,
+                                                        math::degToRad(smoothAngle),
+                                                        weldVertices,
+                                                        weldTolerance);
         if (!newModel)
         {
             QMessageBox::warning(this, tr("Internal Error"), tr("Out of memory error during normal generation"));
         }
         else
         {
-            setModel(modelFileName(), newModel);
+            setModel(modelFileName(), std::move(newModel));
         }
 
         settings.setValue("SmoothAngle", smoothAngle);
@@ -624,11 +571,9 @@ MainWindow::generateNormals()
 void
 MainWindow::generateTangents()
 {
-    Model* model = m_modelView->model();
+    const cmod::Model* model = m_modelView->model();
     if (!model)
-    {
         return;
-    }
 
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Generate Surface Tangents"));
@@ -656,32 +601,30 @@ MainWindow::generateTangents()
         double weldTolerance = toleranceEdit->text().toDouble();
         bool weldVertices = true;
 
-        Model* newModel = new Model();
+        auto newModel = std::make_unique<cmod::Model>();
 
         // Copy materials
         for (unsigned int i = 0; model->getMaterial(i) != nullptr; i++)
         {
-            newModel->addMaterial(cloneMaterial(model->getMaterial(i)));
+            newModel->addMaterial(model->getMaterial(i)->clone());
         }
 
         for (unsigned int i = 0; model->getMesh(i) != nullptr; i++)
         {
-            Mesh* mesh = model->getMesh(i);
-            Mesh* newMesh = nullptr;
-
-            newMesh = GenerateTangents(*mesh, weldVertices);
-            if (newMesh == nullptr)
+            const cmod::Mesh* mesh = model->getMesh(i);
+            cmod::Mesh newMesh = cmodtools::GenerateTangents(*mesh, weldVertices);
+            if (newMesh.getVertexCount() == 0)
             {
-                cerr << "Error generating normals!\n";
+                std::cerr << "Error generating normals!\n";
                 // TODO: Clone the mesh and add it to the model
             }
             else
             {
-                newModel->addMesh(newMesh);
+                newModel->addMesh(std::move(newMesh));
             }
         }
 
-        setModel(modelFileName(), newModel);
+        setModel(modelFileName(), std::move(newModel));
 
         settings.setValue("WeldTolerance", weldTolerance);
     }
@@ -691,16 +634,14 @@ MainWindow::generateTangents()
 void
 MainWindow::uniquifyVertices()
 {
-    Model* model = m_modelView->model();
+    cmod::Model* model = m_modelView->model();
     if (!model)
-    {
         return;
-    }
 
     for (unsigned int i = 0; model->getMesh(i) != nullptr; i++)
     {
-        Mesh* mesh = model->getMesh(i);
-        UniquifyVertices(*mesh);
+        cmod::Mesh* mesh = model->getMesh(i);
+        cmodtools::UniquifyVertices(*mesh);
     }
 
     showModelStatistics();
@@ -711,14 +652,11 @@ MainWindow::uniquifyVertices()
 void
 MainWindow::mergeMeshes()
 {
-    Model* model = m_modelView->model();
+    const cmod::Model* model = m_modelView->model();
     if (!model)
-    {
         return;
-    }
 
-    Model* newModel = MergeModelMeshes(*model);
-    setModel(modelFileName(), newModel);
+    setModel(modelFileName(), cmodtools::MergeModelMeshes(*model));
 }
 
 
@@ -732,9 +670,9 @@ MainWindow::updateSelectionInfo()
     else
     {
         m_materialWidget->setEnabled(true);
-        QSetIterator<Mesh::PrimitiveGroup*> iter(m_modelView->selection());
-        Mesh::PrimitiveGroup* selectedGroup = iter.next();
-        const Material* material = m_modelView->model()->getMaterial(selectedGroup->materialIndex);
+        QSetIterator<const cmod::PrimitiveGroup*> iter(m_modelView->selection());
+        const cmod::PrimitiveGroup* selectedGroup = iter.next();
+        const cmod::Material* material = m_modelView->model()->getMaterial(selectedGroup->materialIndex);
         if (material)
         {
             m_materialWidget->setMaterial(*material);
@@ -744,12 +682,12 @@ MainWindow::updateSelectionInfo()
 
 
 void
-MainWindow::changeCurrentMaterial(const Material& material)
+MainWindow::changeCurrentMaterial(const cmod::Material& material)
 {
     if (!m_modelView->selection().isEmpty())
     {
-        QSetIterator<Mesh::PrimitiveGroup*> iter(m_modelView->selection());
-        Mesh::PrimitiveGroup* selectedGroup = iter.next();
+        QSetIterator<const cmod::PrimitiveGroup*> iter(m_modelView->selection());
+        const cmod::PrimitiveGroup* selectedGroup = iter.next();
         m_modelView->setMaterial(selectedGroup->materialIndex, material);
     }
 }
@@ -771,3 +709,5 @@ MainWindow::editBackgroundColor()
         m_modelView->setBackgroundColor(originalColor);
     }
 }
+
+} // end namespace cmodview

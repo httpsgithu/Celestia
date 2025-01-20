@@ -1,99 +1,97 @@
+// dsodb.h
 //
-// C++ Interface: dsodb
+// Copyright (C) 2005-2024, the Celestia Development Team
 //
-// Description:
-//
-//
+// Original version:
 // Author: Toti <root@totibox>, (C) 2005
 //
-// Copyright: See COPYING file that comes with this distribution
-//
-//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
 
-#ifndef _DSODB_H_
-#define _DSODB_H_
+#pragma once
 
-#include <iostream>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
-#include <celengine/dsoname.h>
-#include <celengine/deepskyobj.h>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+#include <celengine/completion.h>
 #include <celengine/dsooctree.h>
-#include <celengine/parser.h>
 
+class DeepSkyObject;
+class DSODatabaseBuilder;
+class NameDatabase;
 
-constexpr const unsigned int MAX_DSO_NAMES = 10;
+constexpr inline unsigned int MAX_DSO_NAMES = 10;
 
 // 100 Gly - on the order of the current size of the universe
-constexpr const float DSO_OCTREE_ROOT_SIZE = 1.0e11f;
+constexpr inline float DSO_OCTREE_ROOT_SIZE = 1.0e11f;
 
 //NOTE: this one and starDatabase should be derived from a common base class since they share lots of code and functionality.
 class DSODatabase
 {
- public:
-    DSODatabase() = default;
+public:
+    DSODatabase(std::unique_ptr<celestia::engine::DSOOctree>&&,
+                std::unique_ptr<NameDatabase>&&,
+                std::vector<std::uint32_t>&&,
+                float);
+
     ~DSODatabase();
 
-
-    inline DeepSkyObject* getDSO(const uint32_t) const;
-    inline uint32_t size() const;
+    DeepSkyObject* getDSO(const std::uint32_t) const;
+    std::uint32_t size() const;
 
     DeepSkyObject* find(const AstroCatalog::IndexNumber catalogNumber) const;
-    DeepSkyObject* find(const std::string&, bool i18n) const;
+    DeepSkyObject* find(std::string_view, bool i18n) const;
 
-    std::vector<std::string> getCompletion(const std::string&, bool i18n) const;
+    void getCompletion(std::vector<celestia::engine::Completion>&, std::string_view) const;
 
-    void findVisibleDSOs(DSOHandler& dsoHandler,
+    void findVisibleDSOs(celestia::engine::DSOHandler& dsoHandler,
                          const Eigen::Vector3d& obsPosition,
                          const Eigen::Quaternionf& obsOrientation,
                          float fovY,
                          float aspectRatio,
-                         float limitingMag,
-                         OctreeProcStats * = nullptr) const;
+                         float limitingMag) const;
 
-    void findCloseDSOs(DSOHandler& dsoHandler,
+    void findCloseDSOs(celestia::engine::DSOHandler& dsoHandler,
                        const Eigen::Vector3d& obsPosition,
                        float radius) const;
 
-    std::string getDSOName    (const DeepSkyObject* const &, bool i18n = false) const;
-    std::string getDSONameList(const DeepSkyObject* const &, const unsigned int maxNames = MAX_DSO_NAMES) const;
+    std::string getDSOName    (const DeepSkyObject*, bool i18n = false) const;
+    std::string getDSONameList(const DeepSkyObject*, const unsigned int maxNames = MAX_DSO_NAMES) const;
 
-    DSONameDatabase* getNameDatabase() const;
-    void setNameDatabase(DSONameDatabase*);
-
-    bool load(std::istream&, const fs::path& resourcePath = fs::path());
-    bool loadBinary(std::istream&);
-    void finish();
-
-    static DSODatabase* read(std::istream&);
-
-    double getAverageAbsoluteMagnitude() const;
+    float getAverageAbsoluteMagnitude() const;
 
 private:
-    void buildIndexes();
-    void buildOctree();
-    void calcAvgAbsMag();
+    std::unique_ptr<celestia::engine::DSOOctree> m_octreeRoot;
+    std::unique_ptr<NameDatabase> m_namesDB;
+    std::vector<std::uint32_t> m_catalogNumberIndex;
 
-    int              nDSOs{ 0 };
-    int              capacity{ 0 };
-    DeepSkyObject**  DSOs{ nullptr };
-    DSONameDatabase* namesDB{ nullptr };
-    DeepSkyObject**  catalogNumberIndex{ nullptr };
-    DSOOctree*       octreeRoot{ nullptr };
-    AstroCatalog::IndexNumber nextAutoCatalogNumber{ 0xfffffffe };
+    float m_avgAbsMag{ 0.0f };
 
-    double           avgAbsMag{ 0.0 };
+    friend class DSODatabaseBuilder;
 };
 
-
-DeepSkyObject* DSODatabase::getDSO(const uint32_t n) const
+inline DeepSkyObject*
+DSODatabase::getDSO(const std::uint32_t n) const
 {
-    return *(DSOs + n);
+    return (*m_octreeRoot)[n].get();
 }
 
-
-uint32_t DSODatabase::size() const
+inline std::uint32_t
+DSODatabase::size() const
 {
-    return nDSOs;
+    return m_octreeRoot->size();
 }
 
-#endif // _DSODB_H_
+inline float
+DSODatabase::getAverageAbsoluteMagnitude() const
+{
+    return m_avgAbsMag;
+}

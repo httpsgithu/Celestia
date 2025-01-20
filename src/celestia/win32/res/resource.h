@@ -3,6 +3,7 @@
 // Used by celestia.rc
 //
 #define VERSION_STRING                  "1.7.0"
+#define CELESTIA_URL                    TEXT("https://celestiaproject.space/")
 #define IDR_MENU1                       101
 #define IDD_ABOUT                       102
 #define IDI_CELESTIA_ICON               103
@@ -180,7 +181,6 @@
 #define IDC_EDIT_FEATURE_SIZE           1151
 #define IDC_CELESTIALINK                1152
 #define IDC_COMBOBOX_TIMEZONE           1153
-#define IDC_CELESTIALINK2               1153
 #define IDC_COMBOBOX_DATE_FORMAT        1154
 #define IDC_SOLARECLIPSE                1155
 #define IDC_LUNARECLIPSE                1156
@@ -229,7 +229,6 @@
 #define ID_BOOKMARKS_ADDBOOKMARK        40034
 #define ID_RENDER_LOCATIONS             40035
 #define ID_INFO                         40040
-#define ID_HELP_RUNDEMO                 40041
 #define ID_RENDER_MORESTARS             40042
 #define ID_RENDER_FEWERSTARS            40043
 #define ID_RENDER_AUTOMAG               40044
@@ -269,9 +268,12 @@
 #define ID_RENDER_VELOCITY_VECTOR       40086
 #define ID_RENDER_PLANETOGRAPHIC_GRID   40087
 #define ID_RENDER_TERMINATOR            40088
-#define ID_STARCOLOR_DISABLED           40089
-#define ID_STARCOLOR_ENABLED            40090
-#define ID_SELECT_PRIMARY_BODY          40091
+#define ID_STARCOLOR_CLASSIC            40089
+#define ID_STARCOLOR_D65                40090
+#define ID_STARCOLOR_SOLAR              40091
+#define ID_STARCOLOR_VEGA               40092
+#define ID_SELECT_PRIMARY_BODY          40093
+#define ID_FILE_RUNDEMO                 40094
 #define ID_BOOKMARKS_FIRSTBOOKMARK      41000
 #define ID_FIRST_SCRIPT                 42000
 

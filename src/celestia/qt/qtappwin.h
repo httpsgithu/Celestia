@@ -10,58 +10,66 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTAPPWIN_H_
-#define _QTAPPWIN_H_
+#pragma once
+
+#include <QImage>
+#include <QMainWindow>
+#include <QString>
+#include <QTimer>
 
 #include <celestia/celestiacore.h>
-#include <QMainWindow>
 
-
-class QMenu;
 class QCloseEvent;
+class QColor;
 class QDockWidget;
-class CelestiaGlWidget;
-class CelestialBrowser;
-class InfoPanel;
-class EventFinder;
-class CelestiaActions;
-class FPSActionGroup;
+class QMenu;
+class QPoint;
+class QSettings;
+class QToolBar;
+class QUrl;
+class QWidget;
 
-class PreferencesDialog;
+class Selection;
+
+namespace celestia::qt
+{
+
 class BookmarkManager;
 class BookmarkToolBar;
-class QUrl;
+class CelestiaActions;
+struct CelestiaCommandLineOptions;
+class CelestiaGlWidget;
+class CelestialBrowser;
+class EventFinder;
+class InfoPanel;
+class PreferencesDialog;
+class TimeToolBar;
+class TourGuideDialog;
 
 class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHandler
 {
- Q_OBJECT
+     Q_OBJECT
 
- public:
+public:
     CelestiaAppWindow(QWidget* parent = nullptr);
     ~CelestiaAppWindow();
 
-    void init(const QString& configFileName,
-              const QStringList& extrasDirectories,
-              const QString& logFilename);
+    void init(const CelestiaCommandLineOptions&);
+    void startAppCore();
 
-    void readSettings();
-    void writeSettings();
-    bool loadBookmarks();
-    void saveBookmarks();
-
-    void requestContextMenu(float x, float y, Selection sel);
-
+    void requestContextMenu(float x, float y, Selection sel) override;
     void loadingProgressUpdate(const QString& s);
 
- public slots:
+public slots:
     void celestia_tick();
     void slotShowSelectionContextMenu(const QPoint& pos, Selection& sel);
     void slotManual();
+    void slotWiki();
     void setCheckedFPS();
     void setFPS(int);
     void setCustomFPS();
 
- private slots:
+private slots:
     void slotGrabImage();
     void slotCaptureVideo();
     void slotCopyImage();
@@ -72,6 +80,7 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
     void gotoSelection();
     void gotoObject();
     void selectSun();
+    void tourGuide();
 
     void slotPreferences();
 
@@ -88,6 +97,7 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
 
     void slotOpenScriptDialog();
     void slotOpenScript();
+    void slotRunDemo();
 
     void slotShowTimeDialog();
 
@@ -108,10 +118,12 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
     void copyTextOrURL();
     void pasteTextOrURL();
 
- signals:
+signals:
     void progressUpdate(const QString& s, int align, const QColor& c);
 
- private:
+private:
+    class FPSActionGroup;
+
     void initAppDataDirectory();
 
     void createActions();
@@ -119,9 +131,18 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
     QMenu* buildScriptsMenu();
     void populateBookmarkMenu();
 
-    void closeEvent(QCloseEvent* event);
+    void readSettings();
+    void writeSettings();
+    bool loadBookmarks();
+    void saveBookmarks();
 
- private:
+    void closeEvent(QCloseEvent* event) override;
+
+    void switchToNormal();
+    void switchToFullscreen();
+
+    QImage grabFramebuffer() const;
+
     CelestiaGlWidget* glWidget{ nullptr };
     QDockWidget* toolsDock{ nullptr };
     CelestialBrowser* celestialBrowser{ nullptr };
@@ -139,6 +160,8 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
     QMenu* bookmarkMenu{ nullptr };
     QMenu* viewMenu{ nullptr };
     QMenu* helpMenu{ nullptr };
+    TimeToolBar* timeToolBar{ nullptr };
+    QToolBar* guidesToolBar{ nullptr };
 
     InfoPanel* infoPanel{ nullptr };
     EventFinder* eventFinder{ nullptr };
@@ -150,9 +173,9 @@ class CelestiaAppWindow : public QMainWindow, public CelestiaCore::ContextMenuHa
     BookmarkToolBar* m_bookmarkToolBar{ nullptr };
 
     QString m_dataDirPath;
+    QString m_dataHome;
 
     QTimer *timer;
 };
 
-
-#endif // _QTAPPWIN_H_
+} // end namespace celestia::qt

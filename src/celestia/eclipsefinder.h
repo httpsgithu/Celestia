@@ -10,11 +10,12 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _ECLIPSEFINDER_H_
-#define _ECLIPSEFINDER_H_
+#pragma once
 
 #include <vector>
-#include "celestiacore.h"
+
+class Body;
+
 
 struct Eclipse
 {
@@ -31,6 +32,7 @@ struct Eclipse
     double endTime{ 0.0 };
 };
 
+
 class EclipseFinderWatcher
 {
  public:
@@ -44,18 +46,17 @@ class EclipseFinderWatcher
     virtual ~EclipseFinderWatcher() = default;
 };
 
+
 class EclipseFinder
 {
  public:
-    EclipseFinder(Body*, EclipseFinderWatcher* = nullptr);
+    EclipseFinder(const Body*, EclipseFinderWatcher* = nullptr);
 
     void findEclipses(double startDate,
                       double endDate,
                       int eclipseTypeMask,
                       std::vector<Eclipse>& eclipses);
  private:
-    Body* body;
+    const Body* body;
     EclipseFinderWatcher* watcher;
 };
-#endif // _ECLIPSEFINDER_H_
-

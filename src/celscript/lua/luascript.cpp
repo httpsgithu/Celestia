@@ -10,12 +10,14 @@
 #include <set>
 #include <string>
 #include <fstream>
-#include <fmt/printf.h>
+#include <fmt/ostream.h>
 #include <celcompat/filesystem.h>
 #include <celephem/scriptobject.h>
 #include <celestia/configfile.h>
 #include <celestia/celestiacore.h>
+#include <celestia/progressnotifier.h>
 #include <celutil/gettext.h>
+#include <celutil/logger.h>
 #include "celx_internal.h"
 #include "luascript.h"
 
@@ -23,6 +25,8 @@ using namespace std;
 
 namespace celestia
 {
+using util::GetLogger;
+
 namespace scripts
 {
 
@@ -81,10 +85,10 @@ bool LuaScriptPlugin::isOurFile(const fs::path &p) const
 
 unique_ptr<IScript> LuaScriptPlugin::loadScript(const fs::path &path)
 {
-    ifstream scriptfile(path.string());
+    ifstream scriptfile(path);
     if (!scriptfile.good())
     {
-        appCore()->fatalError(fmt::sprintf(_("Error opening script '%s'"), path));
+        appCore()->fatalError(fmt::format(_("Error opening script {}"), path));
         return nullptr;
     }
 
@@ -159,7 +163,7 @@ static string lua_path(const CelestiaConfig *config)
     string LuaPath = "?.lua;celxx/?.lua;";
 
     // Find the path for lua files in the extras directories
-    for (const auto& dir : config->extrasDirs)
+    for (const auto& dir : config->paths.extrasDirs)
     {
         if (dir.empty())
             continue;
@@ -167,7 +171,7 @@ static string lua_path(const CelestiaConfig *config)
         std::error_code ec;
         if (!fs::is_directory(dir, ec))
         {
-            fmt::fprintf(cerr, "Path %s doesn't exist or isn't a directory", dir);
+            GetLogger()->warn(_("Path {} doesn't exist or isn't a directory\n"), dir);
             continue;
         }
 
@@ -204,16 +208,16 @@ bool CreateLuaEnvironment(CelestiaCore *appCore, const CelestiaConfig *config, P
 
     int status = 0;
     // Execute the Lua hook initialization script
-    if (!config->luaHook.empty())
+    if (!config->paths.luaHook.empty())
     {
-        ifstream scriptfile(config->luaHook.string());
+        ifstream scriptfile(config->paths.luaHook);
         if (!scriptfile.good())
-            appCore->fatalError(fmt::sprintf(_("Error opening LuaHook '%s'"), config->luaHook));
+            appCore->fatalError(fmt::format(_("Error opening LuaHook {}"), config->paths.luaHook));
 
         if (progressNotifier != nullptr)
-            progressNotifier->update(config->luaHook.string());
+            progressNotifier->update(config->paths.luaHook.string());
 
-        status = luaHook->loadScript(scriptfile, config->luaHook);
+        status = luaHook->loadScript(scriptfile, config->paths.luaHook);
     }
     else
     {
@@ -222,7 +226,7 @@ bool CreateLuaEnvironment(CelestiaCore *appCore, const CelestiaConfig *config, P
 
     if (status != 0)
     {
-        cerr << "lua hook load failed\n";
+        GetLogger()->debug("lua hook load failed\n");
         string errMsg = luaHook->getErrorMessage();
         if (errMsg.empty())
             errMsg = _("Unknown error loading hook script");
@@ -235,7 +239,7 @@ bool CreateLuaEnvironment(CelestiaCore *appCore, const CelestiaConfig *config, P
         // script and Celestia's event loop
         if (!luaHook->createThread())
         {
-            cerr << "hook thread failed\n";
+            GetLogger()->debug("hook thread failed\n");
             appCore->fatalError(_("Script coroutine initialization failed"));
             luaHook = nullptr;
         }
@@ -253,10 +257,10 @@ bool CreateLuaEnvironment(CelestiaCore *appCore, const CelestiaConfig *config, P
     // Set up the script context; if the system access policy is allow,
     // it will share the same context as the Lua hook. Otherwise, we
     // create a private context.
-    if (config->scriptSystemAccessPolicy == "allow")
+    if (appCore->getScriptSystemAccessPolicy() == CelestiaCore::ScriptSystemAccessPolicy::Allow)
     {
         if (luaHook != nullptr)
-            SetScriptedObjectContext(luaHook->getState());
+            celestia::ephem::SetScriptedObjectContext(luaHook->getState());
     }
     else
     {
@@ -275,7 +279,7 @@ bool CreateLuaEnvironment(CelestiaCore *appCore, const CelestiaConfig *config, P
             return false;
         }
 
-        SetScriptedObjectContext(luaSandbox->getState());
+        celestia::ephem::SetScriptedObjectContext(luaSandbox->getState());
     }
 
     return true;

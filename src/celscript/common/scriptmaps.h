@@ -1,21 +1,24 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <map>
-#include <string>
-#include <celutil/color.h>
+#include <string_view>
 
-namespace celestia
+class Color;
+enum class BodyClassification : std::uint32_t;
+
+namespace celestia::scripts
 {
-namespace scripts
-{
+
+constexpr inline std::size_t FlagMapNameLength = 20;
+
 // String to flag mappings
-typedef std::map<std::string, uint32_t> FlagMap;
-typedef std::map<std::string, uint64_t> FlagMap64;
-typedef std::map<std::string, Color*>   ColorMap;
+template<typename T>
+using ScriptMap = std::map<std::string_view, T>;
 
-class ScriptMaps
+struct ScriptMaps
 {
- public:
     ScriptMaps();
     ~ScriptMaps() = default;
     ScriptMaps(const ScriptMaps&) = delete;
@@ -23,14 +26,14 @@ class ScriptMaps
     ScriptMaps& operator=(const ScriptMaps&) = delete;
     ScriptMaps& operator=(ScriptMaps&&) = delete;
 
-    FlagMap64 RenderFlagMap;
-    FlagMap   LabelFlagMap;
-    FlagMap64 LocationFlagMap;
-    FlagMap   BodyTypeMap;
-    FlagMap   OverlayElementMap;
-    FlagMap   OrbitVisibilityMap;
-    ColorMap  LineColorMap;
-    ColorMap  LabelColorMap;
+    ScriptMap<std::uint64_t>      RenderFlagMap;
+    ScriptMap<std::uint32_t>      LabelFlagMap;
+    ScriptMap<std::uint64_t>      LocationFlagMap;
+    ScriptMap<BodyClassification> BodyTypeMap;
+    ScriptMap<std::uint32_t>      OverlayElementMap;
+    ScriptMap<std::uint32_t>      OrbitVisibilityMap;
+    ScriptMap<Color*>             LineColorMap;
+    ScriptMap<Color*>             LabelColorMap;
 };
-}
-}
+
+} // end namespace celestia::scripts

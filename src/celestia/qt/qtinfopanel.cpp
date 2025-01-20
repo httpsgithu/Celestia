@@ -10,37 +10,111 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
+#include "qtinfopanel.h"
+#include "qtdateutil.h"
 
-#include <celestia/celestiacore.h>
-#include <celengine/astro.h>
-#include <celutil/gettext.h>
-#include <celutil/utf8.h>
-#include <celengine/universe.h>
-#include <QTextBrowser>
+#include <cmath>
+#include <string>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
 #include <QIODevice>
 #include <QItemSelection>
-#include "qtinfopanel.h"
+#include <QString>
+#include <QTextBrowser>
+#include <QTextStream>
 
-using namespace std;
-using namespace Eigen;
-using namespace celmath;
+#include <celastro/astro.h>
+#include <celastro/date.h>
+#include <celcompat/numbers.h>
+#include <celengine/body.h>
+#include <celengine/selection.h>
+#include <celengine/universe.h>
+#include <celephem/orbit.h>
+#include <celephem/rotation.h>
+#include <celestia/celestiacore.h>
+#include <celmath/mathlib.h>
+#include <celutil/gettext.h>
+#include <celutil/greek.h>
+#include <celutil/logger.h>
+#include <celutil/utf8.h>
 
-// TODO: This should be moved to astro.cpp
-struct OrbitalElements
+using celestia::util::GetLogger;
+
+namespace celestia::qt
 {
-    double semimajorAxis;
-    double eccentricity;
-    double inclination;
-    double longAscendingNode;
-    double argPericenter;
-    double meanAnomaly;
-    double period;
-};
 
-static void CalculateOsculatingElements(const Orbit& orbit,
-                                        double t,
-                                        double dt,
-                                        OrbitalElements* elements);
+namespace
+{
+
+astro::KeplerElements
+CalculateOsculatingElements(const celestia::ephem::Orbit& orbit,
+                            double t,
+                            double dt)
+{
+    double sdt = dt;
+
+    // If the trajectory is finite, make sure we sample
+    // it inside the valid time interval.
+    if (!orbit.isPeriodic())
+    {
+        double beginTime = 0.0;
+        double endTime = 0.0;
+        orbit.getValidRange(beginTime, endTime);
+        GetLogger()->debug("t+dt: {}, endTime: {}\n", t + dt, endTime);
+        if (t + dt > endTime)
+        {
+            GetLogger()->debug("REVERSE\n");
+            sdt = -dt;
+        }
+    }
+
+    Eigen::Vector3d p0 = orbit.positionAtTime(t);
+    Eigen::Vector3d p1 = orbit.positionAtTime(t + sdt);
+    Eigen::Vector3d v0 = orbit.velocityAtTime(t);
+    Eigen::Vector3d v1 = orbit.velocityAtTime(t + sdt);
+
+    double accel = ((v1 - v0) / sdt).norm();
+    Eigen::Vector3d r = p0;
+    double GM = accel * r.squaredNorm();
+
+    GetLogger()->debug("vel: {}\n", v0.norm() / 86400.0);
+    GetLogger()->debug("vel (est): {}\n", (p1 - p0).norm() / sdt / 86400);
+    GetLogger()->debug("osc: {}, {}, {}, GM={}\n", t, dt, accel, GM);
+
+    return astro::StateVectorToElements(p0, v0, GM);
+}
+
+
+QString
+anchor(const QString& href, const QString& text)
+{
+    return QString("<a href=\"%1\">%2</a>").arg(href, text);
+}
+
+
+
+Eigen::Vector3d
+celToJ2000Ecliptic(const Eigen::Vector3d& p)
+{
+    return Eigen::Vector3d(p.x(), -p.z(), p.y());
+}
+
+
+Eigen::Vector3d
+rectToSpherical(const Eigen::Vector3d& v)
+{
+    double r = v.norm();
+    double theta = std::atan2(v.y(), v.x());
+    if (theta < 0)
+        theta = theta + 2.0 * celestia::numbers::pi;
+    double phi = std::asin(v.z() / r);
+
+    return Eigen::Vector3d(theta, phi, r);
+}
+
+} // end unnamed namespace
 
 
 InfoPanel::InfoPanel(CelestiaCore* _appCore, const QString& title, QWidget* parent) :
@@ -53,9 +127,10 @@ InfoPanel::InfoPanel(CelestiaCore* _appCore, const QString& title, QWidget* pare
 }
 
 
-void InfoPanel::buildInfoPage(Selection sel,
-                              Universe* universe,
-                              double tdb)
+void
+InfoPanel::buildInfoPage(Selection sel,
+                         Universe* universe,
+                         double tdb)
 {
     QString pageText;
     QTextStream stream(&pageText, QIODevice::WriteOnly);
@@ -85,21 +160,17 @@ void InfoPanel::buildInfoPage(Selection sel,
 }
 
 
-void InfoPanel::pageHeader(QTextStream& stream)
+void
+InfoPanel::pageHeader(QTextStream& stream)
 {
     stream << "<html><head><title>" << QString(_("Info")) << "</title></head><body>";
 }
 
 
-void InfoPanel::pageFooter(QTextStream& stream)
+void
+InfoPanel::pageFooter(QTextStream& stream)
 {
     stream << "</body></html>";
-}
-
-
-static QString anchor(const QString& href, const QString& text)
-{
-    return QString("<a href=\"%1\">%2</a>").arg(href, text);
 }
 
 
@@ -117,7 +188,7 @@ void InfoPanel::buildSolarSystemBodyPage(const Body* body,
 
     stream << "<br>";
 
-    bool isArtificial = body->getClassification() == Body::Spacecraft;
+    bool isArtificial = body->getClassification() == BodyClassification::Spacecraft;
 
     QString units(_("km"));
     double radius = body->getRadius();
@@ -140,22 +211,30 @@ void InfoPanel::buildSolarSystemBodyPage(const Body* body,
 #endif
 
     double orbitalPeriod = 0.0;
-    if (body->getOrbit(t)->isPeriodic())
-        orbitalPeriod = body->getOrbit(t)->getPeriod();
+    const celestia::ephem::Orbit* orbit = body->getOrbit(t);
+    if (orbit->isPeriodic())
+        orbitalPeriod = orbit->getPeriod();
 
     // Show rotation information for natural, periodic rotators
     if (body->getRotationModel(t)->isPeriodic() && !isArtificial)
     {
-        double rotPeriod = body->getRotationModel(t)->getPeriod();
+        const celestia::ephem::RotationModel* rotationModel = body->getRotationModel(t);
+        double rotPeriod = rotationModel->getPeriod();
 
         double dayLength = 0.0;
-        if (body->getOrbit(t)->isPeriodic())
+        bool prograde = false;
+        if (orbitalPeriod > 0.0)
         {
+            Eigen::Vector3d axis = Eigen::AngleAxisd(rotationModel->equatorOrientationAtTime(t)
+                                                     * body->getBodyFrame(t)->getOrientation(t)).axis();
+            Eigen::Vector3d orbitNormal = body->getOrbitFrame(t)->getOrientation(t)
+                                        * orbit->positionAtTime(t).cross(orbit->velocityAtTime(t));
+            prograde = axis.dot(orbitNormal) >= 0;
             double siderealDaysPerYear = orbitalPeriod / rotPeriod;
-            double solarDaysPerYear = siderealDaysPerYear - 1.0;
-            if (solarDaysPerYear > 0.0001)
+            double solarDaysPerYear = prograde ? siderealDaysPerYear - 1.0 : siderealDaysPerYear + 1.0;
+            if (std::abs(solarDaysPerYear) > 0.0001)
             {
-                dayLength = orbitalPeriod / (siderealDaysPerYear - 1.0);
+                dayLength = std::abs(orbitalPeriod / solarDaysPerYear);
             }
         }
 
@@ -171,6 +250,11 @@ void InfoPanel::buildSolarSystemBodyPage(const Body* body,
         }
 
         stream << QString(_("<b>Sidereal rotation period:</b> %L1 %2")).arg(rotPeriod).arg(units) << "<br>\n";
+        if (orbitalPeriod > 0.0)
+        {
+            QString direction = prograde ? _("Prograde") : _("Retrograde");
+            stream << QString(_("<b>Rotation direction:</b> %1")).arg(direction) << "<br>\n";
+        }
         if (dayLength != 0.0)
         {
             stream << QString(_("<b>Length of day:</b> %L1 %2")).arg(dayLength).arg(units) << "<br>\n";
@@ -178,16 +262,30 @@ void InfoPanel::buildSolarSystemBodyPage(const Body* body,
     }
 
     // Orbit information
-    if (orbitalPeriod != 0.0 || 1)
-    {
-        if (orbitalPeriod == 0.0)
-            orbitalPeriod = 365.25;
+    auto elements = CalculateOsculatingElements(*orbit, t, orbitalPeriod > 0.0 ? orbitalPeriod * 1e-6 : 3.6525e-4);
+    const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
+    if (bodyFeaturesManager->getRings(body) != nullptr)
+        stream << QString(_("<b>Has rings</b>")) << "<br>\n";
+    if (bodyFeaturesManager->getAtmosphere(body) != nullptr)
+        stream << QString(_("<b>Has atmosphere</b>")) << "<br>\n";
 
-        OrbitalElements elements;
-        CalculateOsculatingElements(*body->getOrbit(t),
-                                    t,
-                                    orbitalPeriod * 1.0e-6,
-                                    &elements);
+    // Start and end dates
+    double startTime = 0.0;
+    double endTime = 0.0;
+    body->getLifespan(startTime, endTime);
+
+    if (startTime > -1.0e9)
+        stream << "<br>" << QString(_("<b>Start:</b> %1")).arg(TDBToQString(startTime)) << "<br>\n";
+
+    if (endTime < 1.0e9)
+        stream << "<br>" << QString(_("<b>End:</b> %1")).arg(TDBToQString(endTime)) << "<br>\n";
+
+    stream << "<br><big><b>" << QString(_("Orbit information")) << "</b></big><br>\n";
+    stream << QString(_("Osculating elements for %1")).arg(TDBToQString(t)) << "<br>\n";
+    stream << "<br>\n";
+
+    if (orbitalPeriod > 0.0)
+    {
         if (orbitalPeriod < 2.0)
         {
             orbitalPeriod *= 24.0;
@@ -203,94 +301,64 @@ void InfoPanel::buildSolarSystemBodyPage(const Body* body,
             orbitalPeriod /= 365.25;
         }
 
-        if (body->getRings() != nullptr)
-            stream << QString(_("<b>Has rings</b>")) << "<br>\n";
-        if (body->getAtmosphere() != nullptr)
-            stream << QString(_("<b>Has atmosphere</b>")) << "<br>\n";
-
-        // Start and end dates
-        double startTime = 0.0;
-        double endTime = 0.0;
-        body->getLifespan(startTime, endTime);
-
-        if (startTime > -1.0e9)
-            stream << "<br>" << QString(_("<b>Start:</b> %1")).arg(astro::TDBtoUTC(startTime).toCStr()) << "<br>\n";
-
-        if (endTime < 1.0e9)
-            stream << "<br>" << QString(_("<b>End:</b> %1")).arg(astro::TDBtoUTC(endTime).toCStr()) << "<br>\n";
-
-        stream << "<br><big><b>" << QString(_("Orbit information")) << "</b></big><br>\n";
-        stream << QString(_("Osculating elements for %1")).arg(astro::TDBtoUTC(t).toCStr()) << "<br>\n";
-        stream << "<br>\n";
-//        stream << "<i>[ Orbit reference plane info goes here ]</i><br>\n";
         stream << QString(_("<b>Period:</b> %L1 %2")).arg(orbitalPeriod).arg(units) << "<br>\n";
+    }
 
-        double sma = elements.semimajorAxis;
-        if (sma > 2.5e7)
-        {
-            units = _("AU");
-            sma = astro::kilometersToAU(sma);
-        }
-        else
-        {
-            units = _("km");
-        }
+    double sma = elements.semimajorAxis;
+    if (std::abs(sma) > 2.5e7)
+    {
+        units = _("AU");
+        sma = astro::kilometersToAU(sma);
+    }
+    else
+    {
+        units = _("km");
+    }
 
-        stream << QString(_("<b>Semi-major axis:</b> %L1 %2")).arg(sma).arg(units) << "<br>\n";
-        stream << QString(_("<b>Eccentricity:</b> %L1")).arg(elements.eccentricity) << "<br>\n";
-        stream << QString(_("<b>Inclination:</b> %L1%2")).arg(radToDeg(elements.inclination)).arg(QString::fromUtf8(UTF8_DEGREE_SIGN)) << "<br>\n";
-        stream << QString(_("<b>Pericenter distance:</b> %L1 %2")).arg(sma * (1 - elements.eccentricity)).arg(units) << "<br>\n";
+    stream << QString(_("<b>Semi-major axis:</b> %L1 %2")).arg(sma).arg(units) << "<br>\n";
+    stream << QString(_("<b>Eccentricity:</b> %L1")).arg(elements.eccentricity) << "<br>\n";
+    stream << QString(_("<b>Inclination:</b> %L1°")).arg(math::radToDeg(elements.inclination)) << "<br>\n";
+    stream << QString(_("<b>Pericenter distance:</b> %L1 %2")).arg(sma * (1 - elements.eccentricity)).arg(units) << "<br>\n";
+    if (elements.eccentricity < 1.0)
         stream << QString(_("<b>Apocenter distance:</b> %L1 %2")).arg(sma * (1 + elements.eccentricity)).arg(units) << "<br>\n";
 
-        stream << QString(_("<b>Ascending node:</b> %L1%2")).arg(radToDeg(elements.longAscendingNode)).arg(QString::fromUtf8(UTF8_DEGREE_SIGN)) << "<br>\n";
-        stream << QString(_("<b>Argument of periapsis:</b> %L1%2")).arg(radToDeg(elements.argPericenter)).arg(QString::fromUtf8(UTF8_DEGREE_SIGN)) << "<br>\n";
-        stream << QString(_("<b>Mean anomaly:</b> %L1%2")).arg(radToDeg(elements.meanAnomaly)).arg(QString::fromUtf8(UTF8_DEGREE_SIGN)) << "<br>\n";
-        stream << QString(_("<b>Period (calculated):</b> %L1 %2")).arg(elements.period).arg(_("days")) << "<br>\n";;
+    stream << QString(_("<b>Ascending node:</b> %L1°")).arg(math::radToDeg(elements.longAscendingNode)) << "<br>\n";
+    stream << QString(_("<b>Argument of periapsis:</b> %L1°")).arg(math::radToDeg(elements.argPericenter)) << "<br>\n";
+    stream << QString(_("<b>Mean anomaly:</b> %L1°")).arg(math::radToDeg(elements.meanAnomaly)) << "<br>\n";
+    if (elements.eccentricity < 1.0)
+    {
+        stream << QString(_("<b>Period (calculated):</b> %L1 %2")).arg(elements.period).arg(_("days")) << "<br>\n";
+    }
+    else
+    {
+        stream << QString(_("<b>Mean motion (calculated):</b> %L1°/day")).arg(360.0 / elements.period) << "<br>\n";
     }
 }
 
 
-Vector3d celToJ2000Ecliptic(const Vector3d& p)
+void
+InfoPanel::buildStarPage(const Star* star, const Universe* universe, double tdb, QTextStream& stream)
 {
-    return Vector3d(p.x(), -p.z(), p.y());
-}
-
-
-Vector3d rectToSpherical(const Vector3d& v)
-{
-    double r = v.norm();
-    double theta = atan2(v.y(), v.x());
-    if (theta < 0)
-        theta = theta + 2 * PI;
-    double phi = asin(v.z() / r);
-
-    return Vector3d(theta, phi, r);
-}
-
-
-void InfoPanel::buildStarPage(const Star* star, const Universe* universe, double tdb, QTextStream& stream)
-{
-    string name = ReplaceGreekLetterAbbr(universe->getStarCatalog()->getStarName(*star, true));
+    std::string name = ReplaceGreekLetterAbbr(universe->getStarCatalog()->getStarName(*star, true));
     stream << QString("<h1>%1</h1>").arg(QString::fromStdString(name));
 
     // Compute the star's position relative to the Solar System Barycenter. Note that
     // this will ignore the effect of parallax in the star's position.
     // TODO: Use either the observer's position or the Earth's position as the
     // origin instead.
-    Vector3d celPos = star->getPosition(tdb).offsetFromKm(UniversalCoord::Zero());
-    Vector3d eqPos = astro::eclipticToEquatorial(celToJ2000Ecliptic(celPos));
-    Vector3d sph = rectToSpherical(eqPos);
+    Eigen::Vector3d celPos = star->getPosition(tdb).offsetFromKm(UniversalCoord::Zero());
+    Eigen::Vector3d eqPos = astro::eclipticToEquatorial(celToJ2000Ecliptic(celPos));
+    Eigen::Vector3d sph = rectToSpherical(eqPos);
 
     int hours = 0;
     int minutes = 0;
     double seconds = 0;
-    astro::decimalToHourMinSec(radToDeg(sph.x()), hours, minutes, seconds);
+    astro::decimalToHourMinSec(math::radToDeg(sph.x()), hours, minutes, seconds);
     stream << QString(_("<b>RA:</b> %L1h %L2m %L3s")).arg(hours).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
 
     int degrees = 0;
-    astro::decimalToDegMinSec(radToDeg(sph.y()), degrees, minutes, seconds);
-    stream << QString(_("<b>Dec:</b> %L1%2 %L3' %L4\"")).arg(degrees).arg(QString::fromUtf8(UTF8_DEGREE_SIGN))
-                                                        .arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
+    astro::decimalToDegMinSec(math::radToDeg(sph.y()), degrees, minutes, seconds);
+    stream << QString(_("<b>Dec:</b> %L1° %L2′ %L3″")).arg(degrees).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
 }
 
 
@@ -298,38 +366,36 @@ void InfoPanel::buildDSOPage(const DeepSkyObject* dso,
                              const Universe* universe,
                              QTextStream& stream)
 {
-    string name = universe->getDSOCatalog()->getDSOName(dso, true);
+    std::string name = universe->getDSOCatalog()->getDSOName(dso, true);
     stream << QString("<h1>%1</h1>").arg(QString::fromStdString(name));
 
-    Vector3d eqPos = astro::eclipticToEquatorial(celToJ2000Ecliptic(dso->getPosition()));
-    Vector3d sph = rectToSpherical(eqPos);
+    Eigen::Vector3d eqPos = astro::eclipticToEquatorial(celToJ2000Ecliptic(dso->getPosition()));
+    Eigen::Vector3d sph = rectToSpherical(eqPos);
 
     int hours = 0;
     int minutes = 0;
     double seconds = 0;
-    astro::decimalToHourMinSec(radToDeg(sph.x()), hours, minutes, seconds);
+    astro::decimalToHourMinSec(math::radToDeg(sph.x()), hours, minutes, seconds);
     stream << QString(_("<b>RA:</b> %L1h %L2m %L3s")).arg(hours).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
 
     int degrees = 0;
-    astro::decimalToDegMinSec(radToDeg(sph.y()), degrees, minutes, seconds);
-    stream << QString(_("<b>Dec:</b> %L1%2 %L3' %L4\"")).arg(degrees).arg(QString::fromUtf8(UTF8_DEGREE_SIGN))
-                                                        .arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
+    astro::decimalToDegMinSec(math::radToDeg(sph.y()), degrees, minutes, seconds);
+    stream << QString(_("<b>Dec:</b> %L1° %L2′ %L3″")).arg(degrees).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
 
-    Vector3d galPos = astro::equatorialToGalactic(eqPos);
+    Eigen::Vector3d galPos = astro::equatorialToGalactic(eqPos);
     sph = rectToSpherical(galPos);
 
-    astro::decimalToDegMinSec(radToDeg(sph.x()), degrees, minutes, seconds);
+    astro::decimalToDegMinSec(math::radToDeg(sph.x()), degrees, minutes, seconds);
     // TRANSLATORS: Galactic longitude
-    stream << QString(_("<b>L:</b> %L1%2 %L3' %L4\"")).arg(degrees).arg(QString::fromUtf8(UTF8_DEGREE_SIGN))
-                                                      .arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
-    astro::decimalToDegMinSec(radToDeg(sph.y()), degrees, minutes, seconds);
+    stream << QString(_("<b>L:</b> %L1° %L2′ %L3″")).arg(degrees).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
+    astro::decimalToDegMinSec(math::radToDeg(sph.y()), degrees, minutes, seconds);
     // TRANSLATORS: Galactic latitude
-    stream << QString(_("<b>B:</b> %L1%2 %L3' %L4\"")).arg(degrees).arg(QString::fromUtf8(UTF8_DEGREE_SIGN))
-                                                      .arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
+    stream << QString(_("<b>B:</b> %L1° %L2′ %L3″")).arg(degrees).arg(abs(minutes)).arg(abs(seconds)) << "<br>\n";
 }
 
 
-void InfoPanel::updateHelper(ModelHelper* model, const QItemSelection& newSel, const QItemSelection& oldSel)
+void
+InfoPanel::updateHelper(ModelHelper* model, const QItemSelection& newSel, const QItemSelection& oldSel)
 {
     if (!isVisible() || newSel == oldSel || newSel.indexes().length() == 0)
         return;
@@ -343,103 +409,4 @@ void InfoPanel::updateHelper(ModelHelper* model, const QItemSelection& newSel, c
     }
 }
 
-
-static void StateVectorToElements(const Vector3d& position,
-                                  const Vector3d& v,
-                                  double GM,
-                                  OrbitalElements* elements)
-{
-    Vector3d R = position;
-    Vector3d L = R.cross(v);
-    double magR = R.norm();
-    double magL = L.norm();
-    double magV = v.norm();
-    L *= (1.0 / magL);
-
-    Vector3d W = L.cross(R / magR);
-
-    // Compute the semimajor axis
-    double a = 1.0 / (2.0 / magR - square(magV) / GM);
-
-    // Compute the eccentricity
-    double p = square(magL) / GM;
-    double q = R.dot(v);
-    double ex = 1.0 - magR / a;
-    double ey = q / sqrt(a * GM);
-    double e = sqrt(ex * ex + ey * ey);
-
-    // Compute the mean anomaly
-    double E = atan2(ey, ex);
-    double M = E - e * sin(E);
-
-    // Compute the inclination
-    double cosi = L.dot(Vector3d::UnitY());
-    double i = 0.0;
-    if (cosi < 1.0)
-        i = acos(cosi);
-
-    // Compute the longitude of ascending node
-    double Om = atan2(L.x(), L.z());
-
-    // Compute the argument of pericenter
-    Vector3d U = R / magR;
-    double s_nu = v.dot(U) * sqrt(p / GM);
-    double c_nu = v.dot(W) * sqrt(p / GM) - 1;
-    s_nu /= e;
-    c_nu /= e;
-    Vector3d P = U * c_nu - W * s_nu;
-    Vector3d Q = U * s_nu + W * c_nu;
-    double om = atan2(P.y(), Q.y());
-
-    // Compute the period
-    double T = 2 * PI * sqrt(cube(a) / GM);
-
-    elements->semimajorAxis     = a;
-    elements->eccentricity      = e;
-    elements->inclination       = i;
-    elements->longAscendingNode = Om;
-    elements->argPericenter     = om;
-    elements->meanAnomaly       = M;
-    elements->period            = T;
-}
-
-
-static void CalculateOsculatingElements(const Orbit& orbit,
-                                        double t,
-                                        double dt,
-                                        OrbitalElements* elements)
-{
-    double sdt = dt;
-
-    // If the trajectory is finite, make sure we sample
-    // it inside the valid time interval.
-    if (!orbit.isPeriodic())
-    {
-        double beginTime = 0.0;
-        double endTime = 0.0;
-        orbit.getValidRange(beginTime, endTime);
-        clog << "t+dt: " << t + dt << ", endTime: " << endTime << endl;
-        if (t + dt > endTime)
-        {
-            clog << "REVERSE\n";
-            sdt = -dt;
-        }
-    }
-
-    Vector3d p0 = orbit.positionAtTime(t);
-    Vector3d p1 = orbit.positionAtTime(t + sdt);
-    Vector3d v0 = orbit.velocityAtTime(t);
-    Vector3d v1 = orbit.velocityAtTime(t + sdt);
-
-    double accel = ((v1 - v0) / sdt).norm();
-    Vector3d r = p0;
-    double GM = accel * r.squaredNorm();
-
-    clog << "vel: " << v0.norm() / 86400.0 << endl;
-    clog << "vel (est): " << (p1 - p0).norm() / sdt / 86400 << endl;
-    clog << "osc: " << t << ", " << dt << ", " << accel << ", GM=" << GM << endl;
-
-    StateVectorToElements(p0, v0, GM, elements);
-}
-
-
+} // end namespace celestia::qt

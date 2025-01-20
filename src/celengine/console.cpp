@@ -7,67 +7,54 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <cstring>
-#include <cassert>
+#include "console.h"
+
 #include <algorithm>
-#include <iostream>
+#include <cassert>
+
 #include <celmath/geomutil.h>
 #include <celttf/truetypefont.h>
-#include <celutil/utf8.h>
-#include "console.h"
+#include <celutil/color.h>
+#include "glsupport.h"
 #include "render.h"
 #include "shadermanager.h"
-#include "vecgl.h"
 
-using namespace std;
-using namespace celmath;
+namespace math = celestia::math;
 
-static int pmod(int n, int m)
+namespace
+{
+
+constexpr int pmod(int n, int m)
 {
     return n >= 0 ? n % m : m - (-(n + 1) % m) - 1;
 }
 
-
-Console::Console(Renderer& _renderer, int _nRows, int _nColumns) :
-    renderer(_renderer),
-    ostream(&sbuf),
-    nRows(_nRows),
-    nColumns(_nColumns)
-{
-    sbuf.setConsole(this);
-    text = new wchar_t[(nColumns + 1) * nRows];
-    for (int i = 0; i < nRows; i++)
-        text[(nColumns + 1) * i] = '\0';
 }
 
 
-Console::~Console()
+Console::Console(Renderer& _renderer, int _nRows, int _nColumns) :
+    std::ostream(&sbuf),
+    nRows(_nRows),
+    nColumns(_nColumns),
+    renderer(_renderer)
 {
-    delete[] text;
+    sbuf.setConsole(this);
+    text.resize((nColumns + 1) * nRows, u'\0');
 }
 
 
 /*! Resize the console log to use the specified number of rows.
- *  Old long entries are preserved in the resize. setRowCount()
- *  returns true if it was able to successfully allocate a new
- *  buffer, and false if there was a problem (out of memory.)
+ *  setRowCount() returns true if it was able to successfully allocate
+ *  a new buffer, and false if there was a problem (out of memory.)
+ *  This is currently only called on startup, so no attempt to ensure
+ *  sensible preservation of old log entries is made.
  */
 bool Console::setRowCount(int _nRows)
 {
     if (_nRows == nRows)
         return true;
 
-    auto* newText = new wchar_t[(nColumns + 1) * _nRows];
-
-    for (int i = 0; i < _nRows; i++)
-    {
-        newText[(nColumns + 1) * i] = '\0';
-    }
-
-    std::copy(newText, newText + (nColumns + 1) * min(_nRows, nRows), text);
-
-    delete[] text;
-    text = newText;
+    text.resize((nColumns + 1) * _nRows, u'\0');
     nRows = _nRows;
 
     return true;
@@ -76,10 +63,13 @@ bool Console::setRowCount(int _nRows)
 
 void Console::begin()
 {
-    projection = Ortho2D(0.0f, (float)xscale, 0.0f, (float)yscale);
+    projection = math::Ortho2D(0.0f, (float)xscale, 0.0f, (float)yscale);
 
-    renderer.enableBlending();
-    renderer.setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthMask = true;
+    renderer.setPipelineState(ps);
 
     global.reset();
 }
@@ -104,14 +94,11 @@ void Console::render(int rowHeight)
     {
         //int r = (nRows - rowHeight + 1 + windowRow + i) % nRows;
         int r = pmod(row + windowRow + i, nRows);
-        for (int j = 0; j < nColumns; j++)
-        {
-            wchar_t ch = text[r * (nColumns + 1) + j];
-            if (ch == '\0')
-                break;
-            font->render(ch, global.x + xoffset, global.y);
-            xoffset += font->getAdvance(ch);
-        }
+        std::u16string_view line{text.data() + (r * (nColumns + 1)), static_cast<std::size_t>(nColumns)};
+        if (auto endpos = line.find(u'\0'); endpos != std::u16string_view::npos)
+            line = line.substr(0, endpos);
+
+        font->render(line, global.x, global.y);
 
         // advance to the next line
         restorePos();
@@ -153,48 +140,19 @@ void Console::newline()
         windowRow = -windowHeight;
 }
 
-void Console::print(wchar_t c)
+void Console::print(char16_t c)
 {
-    switch (c)
+    if (c == '\n')
     {
-    case '\n':
         newline();
-        break;
-    default:
+    }
+    else
+    {
         if (column == nColumns)
             newline();
         text[row * (nColumns + 1) + column] = c;
         column++;
-        break;
     }
-}
-
-
-void Console::print(char* s)
-{
-    int length = strlen(s);
-    bool validChar = true;
-    int i = 0;
-
-    while (i < length && validChar)
-    {
-        wchar_t ch = 0;
-        validChar = UTF8Decode(s, i, length, ch);
-        i += UTF8EncodedSize(ch);
-        print(ch);
-    }
-}
-
-
-int Console::getRow() const
-{
-    return row;
-}
-
-
-int Console::getColumn() const
-{
-    return column;
 }
 
 
@@ -266,7 +224,6 @@ void Console::restorePos()
         global = posStack.back();
         posStack.pop_back();
     }
-    xoffset = 0.0f;
 }
 
 
@@ -277,7 +234,7 @@ void Console::scroll(int lines)
 
     if (lines < 0)
     {
-        int scrollLimit = -min(height - 1, row);
+        int scrollLimit = -std::min(height - 1, row);
         if (topRow + lines >= scrollLimit)
             setWindowRow(topRow + lines);
         else
@@ -303,69 +260,13 @@ void ConsoleStreamBuf::setConsole(Console* c)
 
 int ConsoleStreamBuf::overflow(int c)
 {
-    if (console != nullptr)
-    {
-        switch (decodeState)
-        {
-        case UTF8DecodeStart:
-            if (c < 0x80)
-            {
-                // Just a normal 7-bit character
-                console->print((char) c);
-            }
-            else
-            {
-                unsigned int count;
+    if (traits_type::eq_int_type(c, traits_type::eof()))
+        return traits_type::eof();
 
-                if ((c & 0xe0) == 0xc0)
-                    count = 2;
-                else if ((c & 0xf0) == 0xe0)
-                    count = 3;
-                else if ((c & 0xf8) == 0xf0)
-                    count = 4;
-                else if ((c & 0xfc) == 0xf8)
-                    count = 5;
-                else if ((c & 0xfe) == 0xfc)
-                    count = 6;
-                else
-                    count = 1; // Invalid byte
+    // for now we don't implement non-BMP characters in the console
+    if (auto result = validator.check(static_cast<unsigned char>(c));
+        result >= 0 && result < 0x10000)
+        console->print(static_cast<char16_t>(result));
 
-                if (count > 1)
-                {
-                    unsigned int mask = (1 << (7 - count)) - 1;
-                    decodeShift = (count - 1) * 6;
-                    decodedChar = (c & mask) << decodeShift;
-                    decodeState = UTF8DecodeMultibyte;
-                }
-                else
-                {
-                    // If the character isn't valid multibyte sequence head,
-                    // silently skip it by leaving the decoder state alone.
-                }
-            }
-            break;
-
-        case UTF8DecodeMultibyte:
-            if ((c & 0xc0) == 0x80)
-            {
-                // We have a valid non-head byte in the sequence
-                decodeShift -= 6;
-                decodedChar |= (c & 0x3f) << decodeShift;
-                if (decodeShift == 0)
-                {
-                    console->print(decodedChar);
-                    decodeState = UTF8DecodeStart;
-                }
-            }
-            else
-            {
-                // Bad byte in UTF-8 encoded sequence; we'll silently ignore
-                // it and reset the state of the UTF-8 decoder.
-                decodeState = UTF8DecodeStart;
-            }
-            break;
-        }
-    }
-
-    return c;
+    return traits_type::not_eof(c);
 }

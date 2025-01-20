@@ -8,37 +8,93 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELMATH_GEOMUTIL_H_
-#define _CELMATH_GEOMUTIL_H_
+#pragma once
+
+#include <array>
+#include <cmath>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <cmath>
 
-namespace celmath
+#include <celcompat/numbers.h>
+#include "mathlib.h"
+
+namespace celestia::math
 {
+
+template<class T>
+const inline Eigen::Quaternion<T> XRot90{ celestia::numbers::sqrt2_v<T> * T{0.5},
+                                          celestia::numbers::sqrt2_v<T> * T{0.5},
+                                          T{0},
+                                          T{0} };
+
+template<class T>
+const inline Eigen::Quaternion<T> XRot180{ T{0}, T{1}, T{0}, T{0} };
+
+// Conjugate of 90 degree rotation = -90 degree rotation
+template<class T>
+const inline Eigen::Quaternion<T> XRot90Conjugate{ celestia::numbers::sqrt2_v<T> * T{0.5},
+                                                   -(celestia::numbers::sqrt2_v<T> * T{0.5}),
+                                                   T{0},
+                                                   T{0} };
+
+template<class T>
+const inline Eigen::Quaternion<T> YRot180{ T{0}, T{0}, T{1}, T{0} };
+
+template<class T>
+const inline Eigen::Quaternion<T> YRot90Conjugate{ celestia::numbers::sqrt2_v<T> * T{0.5},
+                                                   T{0},
+                                                   -(celestia::numbers::sqrt2_v<T> * T{0.5}),
+                                                   T{0} };
+
+template<class T>
+const inline Eigen::Matrix<T, 4, 4> XRot270Matrix = (Eigen::Matrix<T, 4, 4>() <<
+                                                     T{ 1}, T{ 0}, T{ 0}, T{ 0},
+                                                     T{ 0}, T{ 0}, T{ 1}, T{ 0},
+                                                     T{ 0}, T{-1}, T{ 0}, T{ 0},
+                                                     T{ 0}, T{ 0}, T{ 0}, T{ 1}).finished();
+
+template<class T>
+const inline Eigen::Matrix<T, 4, 4> YRot90Matrix = (Eigen::Matrix<T, 4, 4>() <<
+                                                    T{ 0}, T{ 0}, T{ 1}, T{ 0},
+                                                    T{ 0}, T{ 1}, T{ 0}, T{ 0},
+                                                    T{-1}, T{ 0}, T{ 0}, T{ 0},
+                                                    T{ 0}, T{ 0}, T{ 0}, T{ 1}).finished();
+
+template<class T>
+const inline Eigen::Matrix<T, 4, 4> YRot180Matrix = (Eigen::Matrix<T, 4, 4>() <<
+                                                     T{-1}, T{ 0}, T{ 0}, T{ 0},
+                                                     T{ 0}, T{ 1}, T{ 0}, T{ 0},
+                                                     T{ 0}, T{ 0}, T{-1}, T{ 0},
+                                                     T{ 0}, T{ 0}, T{ 0}, T{ 1}).finished();
 
 template<class T> Eigen::Quaternion<T>
 XRotation(T radians)
 {
-    T halfAngle = radians * T(0.5);
-    return Eigen::Quaternion<T>(std::cos(halfAngle), std::sin(halfAngle), 0, 0);
+    T s;
+    T c;
+    sincos(radians * static_cast<T>(0.5), s, c);
+    return Eigen::Quaternion<T>(c, s, 0, 0);
 }
 
 
 template<class T> Eigen::Quaternion<T>
 YRotation(T radians)
 {
-    T halfAngle = radians * T(0.5);
-    return Eigen::Quaternion<T>(std::cos(halfAngle), 0, std::sin(halfAngle), 0);
+    T s;
+    T c;
+    sincos(radians * static_cast<T>(0.5), s, c);
+    return Eigen::Quaternion<T>(c, 0, s, 0);
 }
 
 
 template<class T> Eigen::Quaternion<T>
 ZRotation(T radians)
 {
-    T halfAngle = radians * T(0.5);
-    return Eigen::Quaternion<T>(std::cos(halfAngle), 0, 0, std::sin(halfAngle));
+    T s;
+    T c;
+    sincos(radians * static_cast<T>(0.5), s, c);
+    return Eigen::Quaternion<T>(c, 0, 0, s);
 }
 
 
@@ -67,60 +123,53 @@ LookAt(const Eigen::Matrix<T, 3, 1>& from, const Eigen::Matrix<T, 3, 1>& to, con
 template<class T> bool
 ProjectPerspective(const Eigen::Matrix<T, 3, 1>& from,
                    const Eigen::Matrix<T, 4, 4>& modelViewProjectionMatrix,
-                   const int viewport[4],
+                   const std::array<int, 4>& viewport,
                    Eigen::Matrix<T, 3, 1>& to)
 {
-    Eigen::Matrix<T, 4, 1> in(from.x(), from.y(), from.z(), T(1.0));
+    Eigen::Matrix<T, 4, 1> in(from.x(), from.y(), from.z(), static_cast<T>(1));
     Eigen::Matrix<T, 4, 1> out = modelViewProjectionMatrix * in;
-    if (out.w() == T(0.0))
+    if (out.w() == static_cast<T>(0))
         return false;
 
     out = out.array() / out.w();
     // Map x, y and z to range 0-1
-    out = T(0.5) + out.array() * T(0.5);
+    out = static_cast<T>(0.5) + out.array() * static_cast<T>(0.5);
     // Map x,y to viewport
     out.x() = viewport[0] + out.x() * viewport[2];
     out.y() = viewport[1] + out.y() * viewport[3];
 
     to = { out.x(), out.y(), out.z() };
     return true;
-}
-
-template<class T> bool
-ProjectPerspective(const Eigen::Matrix<T, 3, 1>& from,
-                   const Eigen::Matrix<T, 4, 4>& modelViewMatrix,
-                   const Eigen::Matrix<T, 4, 4>& projMatrix,
-                   const int viewport[4],
-                   Eigen::Matrix<T, 3, 1>& to)
-{
-    Eigen::Matrix<T, 4, 4> m = projMatrix * modelViewMatrix;
-    return Project(from, m, viewport, to);
 }
 
 template<class T> bool
 ProjectFisheye(const Eigen::Matrix<T, 3, 1>& from,
                const Eigen::Matrix<T, 4, 4>& modelViewMatrix,
                const Eigen::Matrix<T, 4, 4>& projMatrix,
-               const int viewport[4],
+               const std::array<int, 4>& viewport,
                Eigen::Matrix<T, 3, 1>& to)
 {
-    Eigen::Matrix<T, 4, 1> inPos = modelViewMatrix * Eigen::Matrix<T, 4, 1>(from.x(), from.y(), from.z(), T(1.0));
+    using std::atan2, std::hypot;
+    Eigen::Matrix<T, 4, 1> inPos = modelViewMatrix * Eigen::Matrix<T, 4, 1>(from.x(),
+                                                                            from.y(),
+                                                                            from.z(),
+                                                                            static_cast<T>(1));
     T l = hypot(inPos.x(), inPos.y());
-    if (l != T(0.0))
+    if (l != static_cast<T>(0))
     {
         T phi = atan2(l, -inPos.z());
-        T ratio = phi / T(M_PI_2) / l;
+        T ratio = phi / static_cast<T>(M_PI_2) / l;
         inPos.x() *= ratio;
         inPos.y() *= ratio;
     }
 
     Eigen::Matrix<T, 4, 1> out = projMatrix * inPos;
-    if (out.w() == T(0.0))
+    if (out.w() == static_cast<T>(0))
         return false;
 
     out = out.array() / out.w();
     // Map x, y and z to range 0-1
-    out = T(0.5) + out.array() * T(0.5);
+    out = static_cast<T>(0.5) + out.array() * static_cast<T>(0.5);
     // Map x,y to viewport
     out.x() = viewport[0] + out.x() * viewport[2];
     out.y() = viewport[1] + out.y() * viewport[3];
@@ -129,22 +178,32 @@ ProjectFisheye(const Eigen::Matrix<T, 3, 1>& from,
     return true;
 }
 
+/*! Return vertical FOV for perspective projection based on screen dpi, number of vertical
+ *  pixels, and screen distance
+ */
+template<class T>
+T PerspectiveFOV(T height, int screenDpi, int distanceToScreen)
+{
+    return static_cast<T>(2.0) * std::atan(height / (static_cast<T>(screenDpi) / static_cast<T>(25.4)) / static_cast<T>(2.0) / static_cast<T>(distanceToScreen));
+}
 
 /*! Return an perspective projection matrix
  */
 template<class T> Eigen::Matrix<T, 4, 4>
 Perspective(T fovy, T aspect, T nearZ, T farZ)
 {
-    if (aspect == T(0.0))
+    using std::cos, std::sin;
+
+    if (aspect == static_cast<T>(0))
         return Eigen::Matrix<T, 4, 4>::Identity();
 
     T deltaZ = farZ - nearZ;
-    if (deltaZ == T(0.0))
+    if (deltaZ == static_cast<T>(0))
         return Eigen::Matrix<T, 4, 4>::Identity();
 
-    T angle = degToRad(fovy / 2);
+    T angle = degToRad(fovy / static_cast<T>(2));
     T sine = sin(angle);
-    if (sine == T(0.0))
+    if (sine == static_cast<T>(0))
         return Eigen::Matrix<T, 4, 4>::Identity();
     T ctg = cos(angle) / sine;
 
@@ -152,9 +211,9 @@ Perspective(T fovy, T aspect, T nearZ, T farZ)
     m(0, 0) = ctg / aspect;
     m(1, 1) = ctg;
     m(2, 2) = -(farZ + nearZ) / deltaZ;
-    m(2, 3) = T(-2.0) * nearZ * farZ / deltaZ;
-    m(3, 2) = T(-1.0);
-    m(3, 3) = T(0.0);
+    m(2, 3) = static_cast<T>(-2) * nearZ * farZ / deltaZ;
+    m(3, 2) = static_cast<T>(-1);
+    m(3, 3) = static_cast<T>(0);
     return m;
 }
 
@@ -167,18 +226,17 @@ Ortho(T left, T right, T bottom, T top, T nearZ, T farZ)
     T tb = top - bottom;
     T fn = farZ - nearZ;
     Eigen::Matrix<T, 4, 4> m;
-    m << 2/rl,    0,     0, - (right + left) / rl,
-            0, 2/tb,     0, - (top + bottom) / tb,
-            0,    0, -2/fn, - (farZ + nearZ) / fn,
-            0,    0,     0,                     1;
+    m << static_cast<T>(2)/rl,    static_cast<T>(0),     static_cast<T>(0), -(right + left)/rl,
+            static_cast<T>(0), static_cast<T>(2)/tb,     static_cast<T>(0), -(top + bottom)/tb,
+            static_cast<T>(0),    static_cast<T>(0), static_cast<T>(-2)/fn, -(farZ + nearZ)/fn,
+            static_cast<T>(0),    static_cast<T>(0),     static_cast<T>(0),  static_cast<T>(1);
     return m;
 }
 
 template<class T> Eigen::Matrix<T, 4, 4>
 Ortho2D(T left, T right, T bottom, T top)
 {
-    return Ortho(left, right, bottom, top, T(-1), T(1));
+    return Ortho(left, right, bottom, top, static_cast<T>(-1), static_cast<T>(1));
 }
 
-} // namespace celmath
-#endif // _CELMATH_GEOMUTIL_H_
+} // namespace celestia::math

@@ -7,17 +7,24 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_ORBIT_H_
-#define _CELENGINE_ORBIT_H_
+#pragma once
+
+#include <memory>
 
 #include <Eigen/Core>
 
+#include <celastro/astro.h>
+
+class Body;
+
+namespace celestia::ephem
+{
 
 class OrbitSampleProc;
 
 class Orbit
 {
- public:
+public:
     virtual ~Orbit() = default;
 
     /*! Return the position in the orbit's reference frame at the specified
@@ -42,8 +49,12 @@ class Orbit
     // Return the time range over which the orbit is valid; if the orbit
     // is always valid, begin and end should be equal.
     virtual void getValidRange(double& begin, double& end) const
-        { begin = 0.0; end = 0.0; };
+    {
+        begin = 0.0;
+        end = 0.0;
+    };
 
+protected:
     struct AdaptiveSamplingParameters
     {
         double tolerance;
@@ -56,31 +67,26 @@ class Orbit
 };
 
 
-class EllipticalOrbit : public Orbit
+class EllipticalOrbit final : public Orbit
 {
- public:
-    EllipticalOrbit(double, double, double, double, double, double, double,
-                    double _epoch = 2451545.0);
-    virtual ~EllipticalOrbit() = default;
+public:
+    EllipticalOrbit(const astro::KeplerElements&, double _epoch = 2451545.0);
+    ~EllipticalOrbit() override = default;
 
     // Compute the orbit for a specified Julian date
-    virtual Eigen::Vector3d positionAtTime(double) const;
-    virtual Eigen::Vector3d velocityAtTime(double) const;
-    double getPeriod() const;
-    double getBoundingRadius() const;
+    Eigen::Vector3d positionAtTime(double) const override;
+    Eigen::Vector3d velocityAtTime(double) const override;
+    double getPeriod() const override;
+    double getBoundingRadius() const override;
 
- private:
+private:
     double eccentricAnomaly(double) const;
     Eigen::Vector3d positionAtE(double) const;
-    Eigen::Vector3d velocityAtE(double) const;
+    Eigen::Vector3d velocityAtE(double, double) const;
 
-    double pericenterDistance;
+    double semiMajorAxis;
+    double semiMinorAxis;
     double eccentricity;
-#if 0
-    double inclination;
-    double ascendingNode;
-    double argOfPeriapsis;
-#endif
     double meanAnomalyAtEpoch;
     double period;
     double epoch;
@@ -89,9 +95,41 @@ class EllipticalOrbit : public Orbit
 };
 
 
+class HyperbolicOrbit final : public Orbit
+{
+public:
+    HyperbolicOrbit(const astro::KeplerElements&, double _epoch = 2451545.0);
+    ~HyperbolicOrbit() override = default;
+
+    // Compute the orbit for a specified Julian date
+    Eigen::Vector3d positionAtTime(double) const override;
+    Eigen::Vector3d velocityAtTime(double) const override;
+    double getPeriod() const override;
+    double getBoundingRadius() const override;
+    bool isPeriodic() const override;
+    void getValidRange(double& begin, double& end) const override;
+
+private:
+    double eccentricAnomaly(double) const;
+    Eigen::Vector3d positionAtE(double) const;
+    Eigen::Vector3d velocityAtE(double) const;
+
+    double semiMajorAxis;
+    double semiMinorAxis;
+    double eccentricity;
+    double meanAnomalyAtEpoch;
+    double meanMotion;
+    double epoch;
+    double startEpoch;
+    double endEpoch;
+
+    Eigen::Matrix3d orbitPlaneRotation;
+};
+
+
 class OrbitSampleProc
 {
- public:
+public:
     virtual ~OrbitSampleProc() = default;
 
     virtual void sample(double t, const Eigen::Vector3d& position, const Eigen::Vector3d& velocity) = 0;
@@ -110,15 +148,13 @@ class CachingOrbit : public Orbit
 {
  public:
     CachingOrbit() = default;
-    virtual ~CachingOrbit() = default;
+    ~CachingOrbit() override = default;
 
     virtual Eigen::Vector3d computePosition(double jd) const = 0;
     virtual Eigen::Vector3d computeVelocity(double jd) const;
-    virtual double getPeriod() const = 0;
-    virtual double getBoundingRadius() const = 0;
 
-    Eigen::Vector3d positionAtTime(double jd) const;
-    Eigen::Vector3d velocityAtTime(double jd) const;
+    Eigen::Vector3d positionAtTime(double jd) const override;
+    Eigen::Vector3d velocityAtTime(double jd) const override;
 
  private:
     mutable Eigen::Vector3d lastPosition;
@@ -138,26 +174,24 @@ class CachingOrbit : public Orbit
 class MixedOrbit : public Orbit
 {
  public:
-    MixedOrbit(Orbit* orbit, double t0, double t1, double mass);
-    virtual ~MixedOrbit();
+    MixedOrbit(const std::shared_ptr<const Orbit>& orbit, double t0, double t1, double mass);
+    ~MixedOrbit() override = default;
 
-    virtual Eigen::Vector3d positionAtTime(double jd) const;
-    virtual Eigen::Vector3d velocityAtTime(double jd) const;
-    virtual double getPeriod() const;
-    virtual double getBoundingRadius() const;
-    virtual void sample(double startTime, double endTime, OrbitSampleProc& proc) const;
+    Eigen::Vector3d positionAtTime(double jd) const override;
+    Eigen::Vector3d velocityAtTime(double jd) const override;
+    double getPeriod() const override;
+    double getBoundingRadius() const override;
+    void sample(double startTime, double endTime, OrbitSampleProc& proc) const override;
 
  private:
-    Orbit* primary;
-    EllipticalOrbit* afterApprox;
-    EllipticalOrbit* beforeApprox;
+    std::shared_ptr<const Orbit> primary;
+    std::shared_ptr<const Orbit> afterApprox;
+    std::shared_ptr<const Orbit> beforeApprox;
     double begin;
     double end;
     double boundingRadius;
 };
 
-
-class Body;
 
 // TODO: eliminate this once body-fixed reference frames are implemented
 /*! An object in a synchronous orbit will always hover of the same spot on
@@ -169,12 +203,12 @@ class SynchronousOrbit : public Orbit
 {
  public:
     SynchronousOrbit(const Body& _body, const Eigen::Vector3d& _position);
-    virtual ~SynchronousOrbit() = default;
+    ~SynchronousOrbit() override = default;
 
-    virtual Eigen::Vector3d positionAtTime(double jd) const;
-    virtual double getPeriod() const;
-    virtual double getBoundingRadius() const;
-    virtual void sample(double, double, OrbitSampleProc& proc) const;
+    Eigen::Vector3d positionAtTime(double jd) const override;
+    double getPeriod() const override;
+    double getBoundingRadius() const override;
+    void sample(double, double, OrbitSampleProc& proc) const override;
 
  private:
     const Body& body;
@@ -189,18 +223,17 @@ class FixedOrbit : public Orbit
 {
  public:
     FixedOrbit(const Eigen::Vector3d& pos);
-    virtual ~FixedOrbit() = default;
+    ~FixedOrbit() override = default;
 
-    virtual Eigen::Vector3d positionAtTime(double) const;
-    //virtual Vec3d velocityAtTime(double) const;
-    virtual double getPeriod() const;
-    virtual bool isPeriodic() const;
-    virtual double getBoundingRadius() const;
-    virtual void sample(double, double, OrbitSampleProc&) const;
+    Eigen::Vector3d positionAtTime(double) const override;
+    // Eigen::Vector3d velocityAtTime(double) const override;
+    double getPeriod() const override;
+    bool isPeriodic() const override;
+    double getBoundingRadius() const override;
+    void sample(double, double, OrbitSampleProc&) const override;
 
  private:
     Eigen::Vector3d position;
 };
 
-
-#endif // _CELENGINE_ORBIT_H_
+}

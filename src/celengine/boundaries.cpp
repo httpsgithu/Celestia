@@ -8,98 +8,128 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <cassert>
 #include "boundaries.h"
-#include "astro.h"
 
-using namespace Eigen;
-using namespace std;
+#include <istream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
-constexpr const float BoundariesDrawDistance = 10000.0f;
+#include <celastro/astro.h>
+#include <celcompat/charconv.h>
 
-ConstellationBoundaries::ConstellationBoundaries()
+using namespace std::string_view_literals;
+namespace astro = celestia::astro;
+
+namespace
 {
-    currentChain = new Chain();
-    currentChain->emplace_back(Vector3f::Zero());
+
+constexpr std::string_view Whitespace = " \t"sv;
+
+constexpr float BoundariesDrawDistance = 10000.0f;
+
+void
+trimLeadingWhitespace(std::string_view& str)
+{
+    if (auto pos = str.find_first_not_of(Whitespace); pos == std::string_view::npos)
+        str = {};
+    else
+        str = str.substr(pos);
 }
 
-ConstellationBoundaries::~ConstellationBoundaries()
+bool
+readFloat(std::string_view& line, float& value)
 {
-    for (const auto chain : chains)
-        delete chain;
-    chains.clear();
+    using celestia::compat::from_chars;
 
-    delete currentChain;
+    trimLeadingWhitespace(line);
+    if (line.empty())
+        return false;
+
+    // charconv cannot handle leading + sign
+    if (line.front() == '+')
+        line = line.substr(1);
+
+    auto [ptr, ec] = from_chars(line.data(), line.data() + line.size(), value);
+    if (ec != std::errc{})
+        return false;
+
+    line = line.substr(static_cast<std::size_t>(ptr - line.data()));
+    return true;
 }
 
+} // end unnamed namespace
 
-const std::vector<ConstellationBoundaries::Chain*>&
+ConstellationBoundaries::ConstellationBoundaries(std::vector<Chain>&& _chains) :
+    chains(std::move(_chains))
+{
+}
+
+const std::vector<ConstellationBoundaries::Chain>&
 ConstellationBoundaries::getChains() const
 {
     return chains;
 }
 
-
-void ConstellationBoundaries::moveto(float ra, float dec)
+std::unique_ptr<ConstellationBoundaries>
+ReadBoundaries(std::istream& in)
 {
-    assert(currentChain != nullptr);
+    // Format of the boundaries.dat file (text):
+    // * Right ascension (floating point)
+    // * Declination (floating point, + sign used for positive)
+    // * Constellation (3 characters)
+    // * Additional field of 1 character, unused
+    // Fields are separated by whitespace, line may include leading space
+    // Comment lines start with #
 
-    Vector3f v = astro::equatorialToEclipticCartesian(ra, dec, BoundariesDrawDistance);
-    if (currentChain->size() > 1)
+    std::vector<ConstellationBoundaries::Chain> chains;
+    ConstellationBoundaries::Chain currentChain;
+
+    std::string buffer(std::size_t(1024), '\0');
+    std::array<char, 3> lastConstellation{ '\0', '\0', '\0' };
+    while (!in.eof())
     {
-        chains.emplace_back(currentChain);
-        currentChain = new Chain();
-        currentChain->emplace_back(v);
-    }
-    else
-    {
-        (*currentChain)[0] = v;
-    }
-}
-
-
-void ConstellationBoundaries::lineto(float ra, float dec)
-{
-    currentChain->emplace_back(astro::equatorialToEclipticCartesian(ra, dec, BoundariesDrawDistance));
-}
-
-
-ConstellationBoundaries* ReadBoundaries(istream& in)
-{
-    auto* boundaries = new ConstellationBoundaries();
-    string lastCon;
-    int conCount = 0;
-    int ptCount = 0;
-
-    for (;;)
-    {
-        float ra = 0.0f;
-        float dec = 0.0f;
-        in >> ra;
-        if (!in.good())
-            break;
-        in >> dec;
-
-        string pt;
-        string con;
-
-        in >> con;
-        in >> pt;
-        if (!in.good())
-            break;
-
-        if (con != lastCon)
-        {
-            boundaries->moveto(ra, dec);
-            lastCon = con;
-            conCount++;
-        }
+        in.getline(buffer.data(), buffer.size());
+        std::size_t lineLength;
+        // delimiter is extracted and contributes to gcount() but is not written to buffer
+        if (in.good())
+            lineLength = static_cast<std::size_t>(in.gcount() - 1);
+        else if (in.eof())
+            lineLength = static_cast<std::size_t>(in.gcount());
         else
+            break;
+
+        auto line = static_cast<std::string_view>(buffer).substr(0, lineLength);
+        if (line.empty() || line.front() == '#')
+            continue;
+
+        float ra;
+        if (!readFloat(line, ra))
+            break;
+        float dec;
+        if (!readFloat(line, dec))
+            break;
+
+        trimLeadingWhitespace(line);
+        auto pos = line.find_first_of(Whitespace);
+        auto constellation = line.substr(0, pos);
+        if (constellation.empty() || constellation == "XXX"sv)
+            break;
+        if (constellation != std::string_view(lastConstellation.data(), lastConstellation.size()))
         {
-            boundaries->lineto(ra, dec);
+            if (currentChain.size() > 1)
+                chains.emplace_back(std::move(currentChain));
+
+            constellation.copy(lastConstellation.data(), lastConstellation.size());
+            currentChain.clear();
         }
-        ptCount++;
+
+        currentChain.emplace_back(astro::equatorialToCelestialCart(ra, dec, BoundariesDrawDistance));
     }
 
-    return boundaries;
+    if (currentChain.size() > 1)
+        chains.emplace_back(std::move(currentChain));
+
+    return std::make_unique<ConstellationBoundaries>(std::move(chains));
 }

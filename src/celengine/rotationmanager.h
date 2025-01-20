@@ -7,41 +7,35 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef CELENGINE_ROTATIONMANAGER_H_
-#define CELENGINE_ROTATIONMANAGER_H_
+#pragma once
 
+#include <memory>
+#include <tuple>
+#include <unordered_map>
+
+#include <celcompat/filesystem.h>
 #include <celephem/rotation.h>
-#include <celutil/resmanager.h>
-#include <string>
-#include <map>
+#include <celutil/fsutils.h>
 
-
-class RotationModelInfo : public ResourceInfo<RotationModel>
+namespace celestia::engine
 {
- public:
-    std::string source;
-    fs::path path;
 
-    RotationModelInfo(const std::string& _source,
-                      const fs::path& _path = "") :
-        source(_source), path(_path) {};
+class RotationModelManager
+{
+public:
+    RotationModelManager() = default;
+    ~RotationModelManager() = default;
 
-    fs::path resolve(const fs::path&) override;
-    RotationModel* load(const fs::path&) override;
+    RotationModelManager(const RotationModelManager&) = delete;
+    RotationModelManager& operator=(const RotationModelManager&) = delete;
+
+    std::shared_ptr<const ephem::RotationModel> find(const fs::path& source,
+                                                     const fs::path& path);
+
+private:
+    std::unordered_map<fs::path, std::weak_ptr<const ephem::RotationModel>, util::PathHasher> rotationModels;
 };
 
-inline bool operator<(const RotationModelInfo& ti0,
-                      const RotationModelInfo& ti1)
-{
-    if (ti0.source == ti1.source)
-        return ti0.path < ti1.path;
-    else
-        return ti0.source < ti1.source;
-}
+RotationModelManager* GetRotationModelManager();
 
-typedef ResourceManager<RotationModelInfo> RotationModelManager;
-
-extern RotationModelManager* GetRotationModelManager();
-
-#endif // CELENGINE_ROTATIONMANAGER_H_
-
+} // end namespace celestia::engine

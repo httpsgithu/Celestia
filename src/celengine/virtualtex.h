@@ -7,16 +7,19 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_VIRTUALTEX_H_
-#define _CELENGINE_VIRTUALTEX_H_
+#pragma once
 
+#include <array>
+#include <memory>
 #include <string>
+
+#include <celcompat/filesystem.h>
 #include <celengine/texture.h>
 
 
 class VirtualTexture : public Texture
 {
- public:
+public:
     VirtualTexture(const fs::path& _tilePath,
                    unsigned int _baseSplit,
                    unsigned int _tileSize,
@@ -24,7 +27,7 @@ class VirtualTexture : public Texture
                    const std::string& _tileType);
     ~VirtualTexture() = default;
 
-    const TextureTile getTile(int lod, int u, int v) override;
+    TextureTile getTile(int lod, int u, int v) override;
     void bind() override;
 
     int getLODCount() const override;
@@ -33,37 +36,32 @@ class VirtualTexture : public Texture
     void beginUsage() override;
     void endUsage() override;
 
- private:
+private:
     struct Tile
     {
         Tile() = default;
         unsigned int lastUsed{ 0 };
-        ImageTexture* tex{ nullptr };
+        std::unique_ptr<ImageTexture> tex{ nullptr };
         bool loadFailed{ false };
     };
 
     struct TileQuadtreeNode
     {
         TileQuadtreeNode() = default;
-        Tile* tile{ nullptr };
-        TileQuadtreeNode* children[4]{ nullptr, nullptr, nullptr, nullptr};
+        std::unique_ptr<Tile> tile{ nullptr };
+        std::array<std::unique_ptr<TileQuadtreeNode>, 4> children{ nullptr, nullptr, nullptr, nullptr };
     };
 
     void populateTileTree();
-    void addTileToTree(Tile* tile, unsigned int lod, unsigned int u, unsigned int v);
+    void addTileToTree(std::unique_ptr<Tile> tile, unsigned int lod, unsigned int u, unsigned int v);
     void makeResident(Tile* tile, unsigned int lod, unsigned int u, unsigned int v);
-    ImageTexture* loadTileTexture(unsigned int lod, unsigned int u, unsigned int v);
+    std::unique_ptr<ImageTexture> loadTileTexture(unsigned int lod, unsigned int u, unsigned int v);
 
-    Tile* tiles{ nullptr };
-    Tile* findTile(unsigned int lod,
-                   unsigned int u, unsigned int v);
-
- private:
+private:
     fs::path tilePath;
     fs::path tileExt;
     std::string tilePrefix;
     unsigned int baseSplit{ 0 };
-    unsigned int tileSize{ 0 };
     unsigned int ticks{ 0 };
     unsigned int tilesRequested{ 0 };
     unsigned int nResolutionLevels{ 0 };
@@ -74,10 +72,9 @@ class VirtualTexture : public Texture
         TileLoadFailed = -2,
     };
 
-    TileQuadtreeNode* tileTree[2];
+    std::array<TileQuadtreeNode, 2> tileTree{};
 };
 
 
-VirtualTexture* LoadVirtualTexture(const fs::path& filename);
-
-#endif // _CELENGINE_VIRTUALTEX_H_
+std::unique_ptr<VirtualTexture>
+LoadVirtualTexture(const fs::path& filename);

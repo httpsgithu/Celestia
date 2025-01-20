@@ -10,51 +10,16 @@
  *  $Id: dialog-star.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_DIALOG_STAR_H
-#define GTK_DIALOG_STAR_H
+#pragma once
 
 #include <gtk/gtk.h>
 
-#include <celengine/starbrowser.h>
-
 #include "common.h"
 
-#define MINLISTSTARS 10
-#define MAXLISTSTARS 500
-
+namespace celestia::gtk
+{
 
 /* Entry Function */
 void dialogStarBrowser(AppData* app);
 
-
-/* Local Data Structures */
-typedef struct _sbData sbData;
-struct _sbData {
-    AppData* app;
-
-    StarBrowser browser;
-    GtkListStore* starListStore;
-    int numListStars;
-    GtkWidget* entry;
-    GtkWidget* scale;
-};
-
-static const char * const sbTitles[] =
-{
-    "Name",
-    "Distance(LY)",
-    "App. Mag",
-    "Abs. Mag",
-    "Type"
-};
-
-static const char * const sbRadioLabels[] =
-{
-    "Nearest",
-    "Brightest (App.)",
-    "Brightest (Abs.)",
-    "With Planets",
-    NULL
-};
-
-#endif /* GTK_DIALOG_STAR_H */
+} // end namespace celestia::gtk

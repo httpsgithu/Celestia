@@ -1,4 +1,4 @@
-// cmoddview - An application for previewing cmod and other 3D file formats
+// cmodview - An application for previewing cmod and other 3D file formats
 // supported by Celestia.
 //
 // Copyright (C) 2010, Chris Laurel <claurel@gmail.com>
@@ -8,29 +8,48 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include "glsupport.h"
 #include "modelviewwidget.h"
-#include "glframebuffer.h"
-#include <QFileInfo>
-#include <QGLWidget>
-#include <QMouseEvent>
-#include <QTextStream>
-#include <Eigen/LU>
+
 #include <algorithm>
-#include <iostream>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <type_traits>
+#include <utility>
 
-using namespace celestia;
-using namespace cmod;
-using namespace Eigen;
+#include <QDebug>
+#include <QFileInfo>
+#include <QImage>
+#include <QIODevice>
+#include <QMap>
+#include <QTextStream>
 
+#include <celengine/framebuffer.h>
+#include <celengine/glshader.h>
+#include <celengine/texture.h>
+#include <celimage/image.h>
+#include <celmath/geomutil.h>
+#include <celmath/mathlib.h>
+#include <celmodel/model.h>
+
+#include "pathmanager.h"
+#include "utils.h"
 
 #define DEBUG_SHADOWS 0
 
-static const float VIEWPORT_FOV = 45.0;
-//static const double PI = 3.1415926535897932;
+namespace math = celestia::math;
+using celestia::engine::Image;
 
-static const int ShadowBufferSize = 1024;
-static const int ShadowSampleKernelWidth = 2;
+namespace cmodview
+{
+
+namespace
+{
+
+constexpr float VIEWPORT_FOV = 45.0f;
+
+constexpr int ShadowBufferSize = 1024;
+constexpr int ShadowSampleKernelWidth = 2;
 
 
 enum {
@@ -39,108 +58,339 @@ enum {
 };
 
 
-inline QString toQString(const wchar_t *s)
+// Calculate the matrix used to render the model from the
+// perspective of the light.
+Eigen::Matrix4f
+directionalLightMatrix(const Eigen::Vector3f& lightDirection)
 {
-    return QString::fromWCharArray(s);
+    Eigen::Vector3f viewDir = lightDirection;
+    Eigen::Vector3f upDir = viewDir.unitOrthogonal();
+    Eigen::Vector3f rightDir = upDir.cross(viewDir);
+    Eigen::Matrix4f m = Eigen::Matrix4f::Identity();
+    m.row(0).head(3) = rightDir;
+    m.row(1).head(3) = upDir;
+    m.row(2).head(3) = viewDir;
+
+    return m;
 }
 
-inline QString toQString(const char *s)
+
+Eigen::Matrix4f
+parallelProjectionMatrix(float left, float right, float bottom, float top, float zNear, float zFar)
 {
-    return QString::fromLocal8Bit(s);
+    // Duplicates OpenGL's glOrtho() function
+    Eigen::Matrix4f m = Eigen::Matrix4f::Identity();
+    m.diagonal() = Eigen::Vector4f(2.0f / (right - left),
+                                   2.0f / (top - bottom),
+                                   -2.0f / (zFar - zNear),
+                                   1.0f);
+    m.col(3) = Eigen::Vector4f(-(right + left) / (right - left),
+                               -(top + bottom) / (top - bottom),
+                               -(zFar + zNear) / (zFar - zNear),
+                               1.0f);
+
+    return m;
 }
+
+
+Eigen::Matrix4f
+shadowProjectionMatrix(float objectRadius)
+{
+    return parallelProjectionMatrix(-objectRadius, objectRadius,
+                                    -objectRadius, objectRadius,
+                                    -objectRadius, objectRadius);
+}
+
+
+constexpr auto VertexAttributeCount = static_cast<std::size_t>(cmod::VertexAttributeFormat::FormatMax);
+
+
+constexpr std::array<GLenum, VertexAttributeCount> GLComponentTypes
+{
+     GL_FLOAT,          // Float1
+     GL_FLOAT,          // Float2
+     GL_FLOAT,          // Float3
+     GL_FLOAT,          // Float4,
+     GL_UNSIGNED_BYTE,  // UByte4
+};
+
+
+constexpr std::array<int, VertexAttributeCount> GLComponentCounts
+{
+     1,  // Float1
+     2,  // Float2
+     3,  // Float3
+     4,  // Float4,
+     4,  // UByte4
+};
+
+
+void
+setVertexArrays(const cmod::VertexDescription& desc, const cmod::VWord* vertexData)
+{
+    const cmod::VertexAttribute& position  = desc.getAttribute(cmod::VertexAttributeSemantic::Position);
+    const cmod::VertexAttribute& normal    = desc.getAttribute(cmod::VertexAttributeSemantic::Normal);
+    const cmod::VertexAttribute& color0    = desc.getAttribute(cmod::VertexAttributeSemantic::Color0);
+    const cmod::VertexAttribute& texCoord0 = desc.getAttribute(cmod::VertexAttributeSemantic::Texture0);
+    const cmod::VertexAttribute& tangent   = desc.getAttribute(cmod::VertexAttributeSemantic::Tangent);
+
+    // Can't render anything unless we have positions
+    if (position.format != cmod::VertexAttributeFormat::Float3)
+        return;
+
+    // Set up the vertex arrays
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, desc.strideBytes, vertexData + position.offsetWords);
+
+    // Set up the normal array
+    switch (normal.format)
+    {
+    case cmod::VertexAttributeFormat::Float3:
+        glEnableClientState(GL_NORMAL_ARRAY);
+        glNormalPointer(GLComponentTypes[static_cast<std::size_t>(normal.format)],
+                        desc.strideBytes, vertexData + normal.offsetWords);
+        break;
+    default:
+        glDisableClientState(GL_NORMAL_ARRAY);
+        break;
+    }
+
+    // Set up the color array
+    switch (color0.format)
+    {
+    case cmod::VertexAttributeFormat::Float3:
+    case cmod::VertexAttributeFormat::Float4:
+    case cmod::VertexAttributeFormat::UByte4:
+        glEnableClientState(GL_COLOR_ARRAY);
+        glColorPointer(GLComponentCounts[static_cast<std::size_t>(color0.format)],
+                       GLComponentTypes[static_cast<std::size_t>(color0.format)],
+                       desc.strideBytes, vertexData + color0.offsetWords);
+        break;
+    default:
+        glDisableClientState(GL_COLOR_ARRAY);
+        break;
+    }
+
+    // Set up the texture coordinate array
+    switch (texCoord0.format)
+    {
+    case cmod::VertexAttributeFormat::Float1:
+    case cmod::VertexAttributeFormat::Float2:
+    case cmod::VertexAttributeFormat::Float3:
+    case cmod::VertexAttributeFormat::Float4:
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glTexCoordPointer(GLComponentCounts[static_cast<std::size_t>(texCoord0.format)],
+                          GLComponentTypes[static_cast<std::size_t>(texCoord0.format)],
+                          desc.strideBytes, vertexData + texCoord0.offsetWords);
+        break;
+    default:
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        break;
+    }
+
+    switch (tangent.format)
+    {
+    case cmod::VertexAttributeFormat::Float3:
+        glEnableVertexAttribArray(TangentAttributeIndex);
+        glVertexAttribPointer(TangentAttributeIndex,
+                              GLComponentCounts[static_cast<std::size_t>(tangent.format)],
+                              GLComponentTypes[static_cast<std::size_t>(tangent.format)],
+                              GL_FALSE,
+                              desc.strideBytes,
+                              vertexData + tangent.offsetWords);
+        break;
+    default:
+        glDisableVertexAttribArray(TangentAttributeIndex);
+        break;
+    }
+}
+
+
+// Set just the vertex pointer
+void
+setVertexPointer(const cmod::VertexDescription& desc, const cmod::VWord* vertexData)
+{
+    const cmod::VertexAttribute& position  = desc.getAttribute(cmod::VertexAttributeSemantic::Position);
+
+    // Can't render anything unless we have positions
+    if (position.format != cmod::VertexAttributeFormat::Float3)
+        return;
+
+    // Set up the vertex arrays
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, desc.strideBytes,
+                    vertexData + position.offsetWords);
+
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableVertexAttribArray(TangentAttributeIndex);
+}
+
+
+GLenum
+getGLMode(cmod::PrimitiveGroupType primitive)
+{
+    switch (primitive)
+    {
+    case cmod::PrimitiveGroupType::TriList:
+        return GL_TRIANGLES;
+    case cmod::PrimitiveGroupType::TriStrip:
+        return GL_TRIANGLE_STRIP;
+    case cmod::PrimitiveGroupType::TriFan:
+        return GL_TRIANGLE_FAN;
+    case cmod::PrimitiveGroupType::LineList:
+        return GL_LINES;
+    case cmod::PrimitiveGroupType::LineStrip:
+        return GL_LINE_STRIP;
+    case cmod::PrimitiveGroupType::PointList:
+        return GL_POINTS;
+    default:
+        return GL_POINTS;
+    }
+}
+
+
+bool gl2Fail = false;
+
+
+void
+setUniformValue(const GLProgram& program, const char* name, float value)
+{
+    GLint location = glGetUniformLocation(program.getID(), name);
+    if (location >= 0)
+        glUniform1f(location, value);
+}
+
+
+template<typename T, std::enable_if_t<std::is_same_v<typename T::Scalar, float>, int> = 0>
+void
+setUniformValue(const GLProgram& program, const char* name, const T& values)
+{
+    GLint location = glGetUniformLocation(program.getID(), name);
+    if (location < 0)
+        return;
+    constexpr int R = T::RowsAtCompileTime;
+    constexpr int C = T::ColsAtCompileTime;
+    if constexpr (R == 3 && C == 1)
+        glUniform3fv(location, 1, values.eval().data());
+    else if constexpr (R == 4 && C == 1)
+        glUniform4fv(location, 1, values.eval().data());
+    else if constexpr (R == 4 && C == 4)
+        glUniformMatrix4fv(location, 1, GL_FALSE, values.eval().data());
+    else
+        static_assert(R <= 0 || C <= 0, "Unhandled matrix size");
+}
+
+
+void setUniformValueArray(const GLProgram& program, const char* name, const Eigen::Vector3f* values, GLsizei count)
+{
+    GLint location = glGetUniformLocation(program.getID(), name);
+    if (location >= 0)
+        glUniform3fv(location, count, values[0].data());
+}
+
+
+void setUniformValueArray(const GLProgram& program, const char* name, const Eigen::Matrix4f* values, GLsizei count)
+{
+    GLint location = glGetUniformLocation(program.getID(), name);
+    if (location >= 0)
+        glUniformMatrix4fv(location, count, GL_FALSE, values[0].data());
+}
+
+
+void
+setSampler(const GLProgram& program, const char* name, GLint value)
+{
+    GLint location = glGetUniformLocation(program.getID(), name);
+    if (location >= 0)
+        glUniform1i(location, value);
+}
+
+
+} // end unnamed namespace
+
 
 class MaterialLibrary
 {
 public:
-    MaterialLibrary(QGLWidget* glWidget,
-                    const QString& modelDirPath) :
-       m_glWidget(glWidget),
+    explicit MaterialLibrary(const QString& modelDirPath) :
        m_modelDirPath(modelDirPath)
     {
     }
 
-    ~MaterialLibrary()
-    {
-        flush();
-    }
+    ~MaterialLibrary();
 
-    GLuint loadTexture(const QString& fileName)
-    {
-        QFileInfo info(fileName);
-        if (!info.exists())
-        {
-            return 0;
-        }
-
-        QString ext = info.suffix().toLower();
-        if (ext == "dds" || ext == "dxt5nm")
-        {
-            GLuint texId = m_glWidget->bindTexture(fileName);
-            // Qt doesn't seem to enable mipmap filtering automatically
-            // TODO: Check whether the texture has mipmaps:
-            //    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &maxLevel);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-            return texId;
-        }
-
-
-        QPixmap texturePixmap(fileName);
-
-        // Mipmaps and linear filtering enabled by default.
-#if QT_VERSION >= 0x040600
-        return m_glWidget->bindTexture(texturePixmap, GL_TEXTURE_2D, GL_RGBA, QGLContext::MipmapBindOption | QGLContext::LinearFilteringBindOption);
-#else
-        return m_glWidget->bindTexture(texturePixmap, GL_TEXTURE_2D, GL_RGBA);
-#endif
-    }
-
-
-    GLuint getTexture(const QString& resourceName)
-    {
-        if (m_textures.contains(resourceName))
-        {
-            return m_textures[resourceName];
-        }
-        else
-        {
-            if (m_glWidget)
-            {
-                GLuint texId = loadTexture(m_modelDirPath + "/" + resourceName);
-                if (texId == 0)
-                {
-                    // Try textures/medres...
-                    texId = loadTexture(m_modelDirPath + "/../textures/medres/" + resourceName);
-                }
-
-                std::cout << "Load " << resourceName.toStdString() << ", texId = " << texId << std::endl;
-                m_textures[resourceName] = texId;
-                return texId;
-            }
-        }
-
-        return 0;
-    }
-
-    void flush()
-    {
-        foreach (GLuint texId, m_textures)
-        {
-            if (texId != 0 && m_glWidget)
-            {
-                m_glWidget->deleteTexture(texId);
-            }
-        }
-    }
+    GLuint getTexture(const QString& resourceName);
 
 private:
-    QGLWidget* m_glWidget;
+    static ImageTexture* loadTexture(const QString& fileName);
+
     QString m_modelDirPath;
-    QMap<QString, GLuint> m_textures;
+    QMap<QString, ImageTexture*> m_textures;
 };
 
 
+MaterialLibrary::~MaterialLibrary()
+{
+    for (ImageTexture* tex : m_textures)
+    {
+        delete tex;
+    }
+}
+
+
+GLuint
+MaterialLibrary::getTexture(const QString& resourceName)
+{
+    ImageTexture* texture;
+    auto it = m_textures.constFind(resourceName);
+    if (it == m_textures.constEnd())
+    {
+        texture = loadTexture(m_modelDirPath + "/" + resourceName);
+        if (texture == nullptr)
+        {
+            // Try textures/medres...
+            texture = loadTexture(m_modelDirPath + "/../textures/medres/" + resourceName);
+            if (texture == nullptr)
+                qWarning() << "Failed to load" << resourceName;
+            else
+                qInfo() << "Loaded" << resourceName;
+        }
+
+        m_textures[resourceName] = texture;
+    }
+    else
+    {
+        texture = *it;
+    }
+
+    return texture == nullptr ? 0 : texture->getName();
+}
+
+
+ImageTexture*
+MaterialLibrary::loadTexture(const QString& fileName)
+{
+    QFileInfo info(fileName);
+    if (!info.exists())
+        return nullptr;
+
+    std::unique_ptr<Image> image;
+    if constexpr (std::is_same_v<fs::path::value_type, wchar_t>)
+        image = Image::load(fileName.toStdWString());
+    else
+        image = Image::load(fileName.toStdString());
+
+    if (image == nullptr)
+        return nullptr;
+
+    return new ImageTexture(*image, Texture::EdgeClamp, Texture::DefaultMipMaps);
+}
+
+
 ShaderKey
-ShaderKey::Create(const Material* material, const LightingEnvironment* lighting, const Mesh::VertexDescription* vertexDesc)
+ShaderKey::Create(const cmod::Material* material, const LightingEnvironment* lighting, const cmod::VertexDescription* vertexDesc)
 {
     // Compute the shader key for a particular material and lighting setup
     unsigned int info = 0;
@@ -149,8 +399,8 @@ ShaderKey::Create(const Material* material, const LightingEnvironment* lighting,
     bool hasTexCoords = false;
     if (vertexDesc)
     {
-        hasTangents = vertexDesc->getAttribute(Mesh::Tangent).format == Mesh::Float3;
-        hasTexCoords = vertexDesc->getAttribute(Mesh::Texture0).format == Mesh::Float2;
+        hasTangents = vertexDesc->getAttribute(cmod::VertexAttributeSemantic::Tangent).format == cmod::VertexAttributeFormat::Float3;
+        hasTexCoords = vertexDesc->getAttribute(cmod::VertexAttributeSemantic::Texture0).format == cmod::VertexAttributeFormat::Float2;
     }
 
     // Bits 0-3 are the number of light sources
@@ -171,33 +421,21 @@ ShaderKey::Create(const Material* material, const LightingEnvironment* lighting,
     // Bits 8-15 are texture map info
     if (hasTexCoords)
     {
-        if (material->maps[Material::DiffuseMap])
-        {
+        if (material->getMap(cmod::TextureSemantic::DiffuseMap) != InvalidResource)
             info |= DiffuseMapMask;
-        }
-
-        if (material->maps[Material::SpecularMap])
-        {
+        if (material->getMap(cmod::TextureSemantic::SpecularMap) != InvalidResource)
             info |= SpecularMapMask;
-        }
-
-        if (material->maps[Material::NormalMap])
-        {
+        if (material->getMap(cmod::TextureSemantic::NormalMap) != InvalidResource)
             info |= NormalMapMask;
-        }
-
-        if (material->maps[Material::EmissiveMap])
-        {
+        if (material->getMap(cmod::TextureSemantic::EmissiveMap) != InvalidResource)
             info |= EmissiveMapMask;
-        }
 
         // Bit 16 is set if the normal map is compressed
-        if (material->maps[Material::NormalMap] && hasTangents)
+        if (material->getMap(cmod::TextureSemantic::NormalMap) != InvalidResource &&
+            hasTangents &&
+            cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::NormalMap)).extension() == ".dxt5nm")
         {
-            if (material->maps[Material::NormalMap]->source().extension() == ".dxt5nm")
-            {
-                info |= CompressedNormalMapMask;
-            }
+            info |= CompressedNormalMapMask;
         }
     }
 
@@ -205,60 +443,15 @@ ShaderKey::Create(const Material* material, const LightingEnvironment* lighting,
 }
 
 
-// Calculate the matrix used to render the model from the
-// perspective of the light.
-static
-Matrix4f directionalLightMatrix(const Vector3f& lightDirection)
-{
-    Vector3f viewDir = lightDirection;
-    Vector3f upDir = viewDir.unitOrthogonal();
-    Vector3f rightDir = upDir.cross(viewDir);
-    Matrix4f m = Matrix4f::Identity();
-    m.row(0).head(3) = rightDir;
-    m.row(1).head(3) = upDir;
-    m.row(2).head(3) = viewDir;
-
-    return m;
-}
-
-
-static
-Matrix4f parallelProjectionMatrix(float left, float right, float bottom, float top, float zNear, float zFar)
-{
-    // Duplicates OpenGL's glOrtho() function
-    Matrix4f m = Matrix4f::Identity();
-    m.diagonal() = Vector4f(2.0f / (right - left),
-                            2.0f / (top - bottom),
-                            -2.0f / (zFar - zNear),
-                            1.0f);
-    m.col(3) = Vector4f(-(right + left) / (right - left),
-                        -(top + bottom) / (top - bottom),
-                        -(zFar + zNear) / (zFar - zNear),
-                        1.0f);
-
-    return m;
-}
-
-
-static
-Matrix4f shadowProjectionMatrix(float objectRadius)
-{
-    return parallelProjectionMatrix(-objectRadius, objectRadius,
-                                    -objectRadius, objectRadius,
-                                    -objectRadius, objectRadius);
-}
-
-
 ModelViewWidget::ModelViewWidget(QWidget *parent) :
-   QGLWidget(parent),
+   QOpenGLWidget(parent),
    m_model(nullptr),
    m_modelBoundingRadius(1.0),
-   m_cameraPosition(Vector3d::Zero()),
-   m_cameraOrientation(Quaterniond::Identity()),
+   m_cameraPosition(Eigen::Vector3d::Zero()),
+   m_cameraOrientation(Eigen::Quaterniond::Identity()),
    m_renderStyle(NormalStyle),
-   m_renderPath(FixedFunctionPath),
    m_materialLibrary(nullptr),
-   m_lightOrientation(Quaterniond::Identity()),
+   m_lightOrientation(Eigen::Quaterniond::Identity()),
    m_lightingEnabled(true),
    m_ambientLightEnabled(true),
    m_shadowsEnabled(false)
@@ -270,21 +463,16 @@ ModelViewWidget::ModelViewWidget(QWidget *parent) :
 ModelViewWidget::~ModelViewWidget()
 {
     delete m_materialLibrary;
-    delete m_model;
 }
 
 
 void
-ModelViewWidget::setModel(cmod::Model* model, const QString& modelDirPath)
+ModelViewWidget::setModel(std::unique_ptr<cmod::Model>&& model, const QString& modelDirPath)
 {
-    if (m_model && m_model != model)
-    {
-        delete m_model;
-    }
-    m_model = model;
+    m_model = std::move(model);
     delete m_materialLibrary;
 
-    m_materialLibrary = new MaterialLibrary(this, modelDirPath);
+    m_materialLibrary = new MaterialLibrary(modelDirPath);
 
     m_selection.clear();
 
@@ -293,22 +481,26 @@ ModelViewWidget::setModel(cmod::Model* model, const QString& modelDirPath)
     {
         for (unsigned int i = 0; i < m_model->getMaterialCount(); ++i)
         {
-            const Material* material = m_model->getMaterial(i);
-            if (material->maps[Material::DiffuseMap])
+            const cmod::Material* material = m_model->getMaterial(i);
+            if (material->getMap(cmod::TextureSemantic::DiffuseMap) != InvalidResource)
             {
-                m_materialLibrary->getTexture(toQString(material->maps[Material::DiffuseMap]->source().c_str()));
+                m_materialLibrary->getTexture(
+                    toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::DiffuseMap)).c_str()));
             }
-            if (material->maps[Material::NormalMap])
+            if (material->getMap(cmod::TextureSemantic::NormalMap) != InvalidResource)
             {
-                m_materialLibrary->getTexture(toQString(material->maps[Material::NormalMap]->source().c_str()));
+                m_materialLibrary->getTexture(
+                    toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::NormalMap)).c_str()));
             }
-            if (material->maps[Material::SpecularMap])
+            if (material->getMap(cmod::TextureSemantic::SpecularMap) != InvalidResource)
             {
-                m_materialLibrary->getTexture(toQString(material->maps[Material::SpecularMap]->source().c_str()));
+                m_materialLibrary->getTexture(
+                    toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::SpecularMap)).c_str()));
             }
-            if (material->maps[Material::EmissiveMap])
+            if (material->getMap(cmod::TextureSemantic::EmissiveMap) != InvalidResource)
             {
-                m_materialLibrary->getTexture(toQString(material->maps[Material::EmissiveMap]->source().c_str()));
+                m_materialLibrary->getTexture(
+                    toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::EmissiveMap)).c_str()));
             }
         }
     }
@@ -322,7 +514,7 @@ ModelViewWidget::setModel(cmod::Model* model, const QString& modelDirPath)
 void
 ModelViewWidget::resetCamera()
 {
-    AlignedBox<float, 3> bbox;
+    Eigen::AlignedBox<float, 3> bbox;
     if (m_model != nullptr)
     {
         for (unsigned int i = 0; i < m_model->getMeshCount(); ++i)
@@ -332,8 +524,8 @@ ModelViewWidget::resetCamera()
     }
 
     m_modelBoundingRadius = std::max(bbox.max().norm(), bbox.min().norm());
-    m_cameraPosition = m_modelBoundingRadius * Vector3d::UnitZ() * 2.0;
-    m_cameraOrientation = Quaterniond::Identity();
+    m_cameraPosition = m_modelBoundingRadius * Eigen::Vector3d::UnitZ() * 2.0;
+    m_cameraOrientation = Eigen::Quaterniond::Identity();
 }
 
 
@@ -349,33 +541,38 @@ ModelViewWidget::setRenderStyle(RenderStyle style)
 
 
 void
-ModelViewWidget::setRenderPath(RenderPath path)
-{
-    if (path != m_renderPath)
-    {
-        m_renderPath = path;
-        update();
-    }
-}
-
-
-void
 ModelViewWidget::mousePressEvent(QMouseEvent *event)
 {
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     m_lastMousePosition = event->pos();
     m_mouseDownPosition = event->pos();
+#else
+    m_lastMousePosition = event->position();
+    m_mouseDownPosition = event->position();
+#endif
 }
 
 
 void
 ModelViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     int moveDistance = (event->pos() - m_mouseDownPosition).manhattanLength();
-    if (moveDistance < 3)
+    constexpr int threshold = 3;
+#else
+    qreal moveDistance = (event->position() - m_mouseDownPosition).manhattanLength();
+    constexpr auto threshold = qreal(3);
+#endif
+    if (moveDistance < threshold)
     {
-        float x = (float) event->pos().x() / (float) size().width() * 2.0f - 1.0f;
-        float y = (float) event->pos().y() / (float) size().height() * -2.0f + 1.0f;
-        select(Vector2f(x, y));
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+        auto position = event->pos();
+#else
+        auto position = event->position();
+#endif
+        float x = static_cast<float>(position.x()) / static_cast<float>(size().width()) * 2.0f - 1.0f;
+        float y = static_cast<float>(position.y()) / static_cast<float>(size().height()) * -2.0f + 1.0f;
+        select(Eigen::Vector2f(x, y));
     }
 }
 
@@ -404,30 +601,37 @@ ModelViewWidget::mouseMoveEvent(QMouseEvent *event)
         rotateLights = true;
     }
 
-    int dx = event->x() - m_lastMousePosition.x();
-    int dy = event->y() - m_lastMousePosition.y();
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    auto delta = event->pos() - m_lastMousePosition;
+#else
+    auto delta = event->position() - m_lastMousePosition;
+#endif
 
-    double xrotation = (double) dy / 100.0;
-    double yrotation = (double) dx / 100.0;
-    Quaterniond q = AngleAxis<double>(-xrotation, Vector3d::UnitX()) *
-                    AngleAxis<double>(-yrotation, Vector3d::UnitY());
+    double xrotation = static_cast<double>(delta.y()) / 100.0;
+    double yrotation = static_cast<double>(delta.x()) / 100.0;
+    Eigen::Quaterniond q = Eigen::AngleAxis<double>(-xrotation, Eigen::Vector3d::UnitX()) *
+                           Eigen::AngleAxis<double>(-yrotation, Eigen::Vector3d::UnitY());
 
     if (rotateLights)
     {
-        Quaterniond r = m_lightOrientation * q * m_lightOrientation.conjugate();
+        Eigen::Quaterniond r = m_lightOrientation * q * m_lightOrientation.conjugate();
         r.normalize();
         m_lightOrientation = r * m_lightOrientation;
     }
     else if (rotateCamera)
     {
-        Quaterniond r = m_cameraOrientation * q * m_cameraOrientation.conjugate();
+        Eigen::Quaterniond r = m_cameraOrientation * q * m_cameraOrientation.conjugate();
         r.normalize();  // guard against accumulating rounding errors
 
         m_cameraPosition    = r * m_cameraPosition;
         m_cameraOrientation = r * m_cameraOrientation;
     }
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     m_lastMousePosition = event->pos();
+#else
+    m_lastMousePosition = event->position();
+#endif
 
     update();
 }
@@ -456,22 +660,22 @@ ModelViewWidget::wheelEvent(QWheelEvent* event)
 
 
 void
-ModelViewWidget::select(const Vector2f& viewportPoint)
+ModelViewWidget::select(const Eigen::Vector2f& viewportPoint)
 {
     if (!m_model)
     {
         return;
     }
 
-    float aspectRatio = (float) size().width() / (float) size().height();
-    auto fovRad = float(VIEWPORT_FOV * PI / 180.0f);
-    float h = (float) tan(fovRad / 2.0f);
-    Vector3d direction(h * aspectRatio * viewportPoint.x(), h * viewportPoint.y(), -1.0f);
+    float aspectRatio = static_cast<float>(size().width()) / static_cast<float>(size().height());
+    auto fovRad = math::degToRad(VIEWPORT_FOV);
+    float h = std::tan(fovRad / 2.0f);
+    Eigen::Vector3d direction(h * aspectRatio * viewportPoint.x(), h * viewportPoint.y(), -1.0f);
     direction.normalize();
-    Vector3d origin = Vector3d::Zero();
-    Affine3d camera(cameraTransform().inverse());
+    Eigen::Vector3d origin = Eigen::Vector3d::Zero();
+    Eigen::Affine3d camera(cameraTransform().inverse());
 
-    Mesh::PickResult pickResult;
+    cmod::Mesh::PickResult pickResult;
     bool hit = m_model->pick(camera * origin, camera.linear() * direction, &pickResult);
     if (hit)
     {
@@ -489,10 +693,10 @@ ModelViewWidget::select(const Vector2f& viewportPoint)
 }
 
 
-Affine3d
+Eigen::Affine3d
 ModelViewWidget::cameraTransform() const
 {
-    Affine3d t(m_cameraOrientation.conjugate());
+    Eigen::Affine3d t(m_cameraOrientation.conjugate());
     t.translate(-m_cameraPosition);
     return t;
 }
@@ -507,42 +711,10 @@ ModelViewWidget::setMaterial(unsigned int index, const cmod::Material& material)
     }
 
     // Copy material parameters
-    // TODO: eliminate const cast when Model::setMaterial() is implemented
-    Material* modelMaterial = const_cast<Material*>(m_model->getMaterial(index));
-    modelMaterial->diffuse = material.diffuse;
-    modelMaterial->specular = material.specular;
-    modelMaterial->emissive = material.emissive;
-    modelMaterial->opacity = material.opacity;
-    modelMaterial->specularPower = material.specularPower;
-
-    delete modelMaterial->maps[Material::DiffuseMap];
-    modelMaterial->maps[Material::DiffuseMap] = nullptr;
-    delete modelMaterial->maps[Material::SpecularMap];
-    modelMaterial->maps[Material::SpecularMap] = nullptr;
-    delete modelMaterial->maps[Material::NormalMap];
-    modelMaterial->maps[Material::NormalMap] = nullptr;
-    delete modelMaterial->maps[Material::EmissiveMap];
-    modelMaterial->maps[Material::EmissiveMap] = nullptr;
-
-    if (material.maps[Material::DiffuseMap])
-    {
-        modelMaterial->maps[Material::DiffuseMap] = new Material::DefaultTextureResource(material.maps[Material::DiffuseMap]->source());
-    }
-    if (material.maps[Material::SpecularMap])
-    {
-        modelMaterial->maps[Material::SpecularMap] = new Material::DefaultTextureResource(material.maps[Material::SpecularMap]->source());
-    }
-    if (material.maps[Material::NormalMap])
-    {
-        modelMaterial->maps[Material::NormalMap] = new Material::DefaultTextureResource(material.maps[Material::NormalMap]->source());
-    }
-    if (material.maps[Material::EmissiveMap])
-    {
-        modelMaterial->maps[Material::EmissiveMap] = new Material::DefaultTextureResource(material.maps[Material::EmissiveMap]->source());
-    }
-
+    m_model->setMaterial(index, material.clone());
     update();
 }
+
 
 void
 ModelViewWidget::setBackgroundColor(const QColor& color)
@@ -555,8 +727,7 @@ ModelViewWidget::setBackgroundColor(const QColor& color)
 void
 ModelViewWidget::initializeGL()
 {
-    gl::init();
-    emit contextCreated();
+    celestia::gl::init();
 }
 
 
@@ -564,17 +735,17 @@ void
 ModelViewWidget::paintGL()
 {
     // Generate the shadow buffers for each light source
-    if (m_shadowsEnabled && m_shadowBuffers.size() > 0)
+    if (m_shadowsEnabled && !m_shadowBuffers.empty())
     {
-        Material defaultMaterial;
-        defaultMaterial.diffuse = Material::Color(1.0f, 1.0f, 1.0f);
+        cmod::Material defaultMaterial;
+        defaultMaterial.diffuse = cmod::Color(1.0f, 1.0f, 1.0f);
         LightingEnvironment lightingOff;
         bindMaterial(&defaultMaterial, &lightingOff, nullptr);
         glEnable(GL_CULL_FACE);
 
         for (int lightIndex = 0; lightIndex < m_lightSources.size(); ++lightIndex)
         {
-            GLFrameBufferObject* shadowBuffer = m_shadowBuffers[lightIndex];
+            FramebufferObject* shadowBuffer = m_shadowBuffers[lightIndex];
             if (shadowBuffer && shadowBuffer->isValid())
             {
                 renderShadow(lightIndex);
@@ -592,9 +763,8 @@ ModelViewWidget::paintGL()
     double farDistance = m_modelBoundingRadius + distanceToOrigin;
 
     glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
     double aspectRatio = (double) size().width() / (double) size().height();
-    gluPerspective(VIEWPORT_FOV, aspectRatio, nearDistance, farDistance);
+    glLoadMatrixd(math::Perspective(static_cast<double>(VIEWPORT_FOV), aspectRatio, nearDistance, farDistance).data());
 
     glEnable(GL_LIGHTING);
 
@@ -604,9 +774,9 @@ ModelViewWidget::paintGL()
     {
         ambientLightLevel = 0.2f;
     }
-    Vector4f ambientLight = Vector4f::Constant(ambientLightLevel);
+    Eigen::Vector4f ambientLight = Eigen::Vector4f::Constant(ambientLightLevel);
     glLightModelfv(GL_LIGHT_MODEL_AMBIENT, ambientLight.data());
-    glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL_EXT, GL_SEPARATE_SPECULAR_COLOR_EXT);
+    glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
 
     for (unsigned int i = 0; i < 8; i++)
     {
@@ -619,10 +789,10 @@ ModelViewWidget::paintGL()
         GLenum glLight = GL_LIGHT0 + lightIndex;
         lightIndex++;
 
-        Vector3d direction = m_lightOrientation * lightSource.direction;
-        Vector4f lightColor = Vector4f::Zero();
+        Eigen::Vector3d direction = m_lightOrientation * lightSource.direction;
+        Eigen::Vector4f lightColor = Eigen::Vector4f::Zero();
         lightColor.head(3) = lightSource.color * lightSource.intensity;
-        Vector4f lightPosition = Vector4f::Zero();
+        Eigen::Vector4f lightPosition = Eigen::Vector4f::Zero();
         lightPosition.head(3) = direction.cast<float>();
 
         glEnable(glLight);
@@ -639,27 +809,26 @@ ModelViewWidget::paintGL()
 
     if (m_model)
     {
-        renderModel(m_model);
+        renderModel(m_model.get());
         if (!m_selection.isEmpty())
         {
             glEnable(GL_POLYGON_OFFSET_FILL);
             glPolygonOffset(-0.0f, -1.0f);
-            renderSelection(m_model);
+            renderSelection(m_model.get());
         }
     }
 
 #if DEBUG_SHADOWS
     // Debugging for shadows: show the first shadow buffer in the corner of the
     // viewport.
-    if (m_shadowsEnabled && m_shadowBuffers.size() > 0)
+    if (m_shadowsEnabled && !m_shadowBuffers.empty())
     {
         GLFrameBufferObject* shadowBuffer = m_shadowBuffers[0];
         if (shadowBuffer && shadowBuffer->isValid())
         {
             glDisable(GL_DEPTH_TEST);
             glMatrixMode(GL_PROJECTION);
-            glLoadIdentity();
-            gluOrtho2D(0, width(), 0, height());
+            glLoadMatrixd(math::Ortho2D(0.0, static_cast<double>(width()), 0.0, static_cast<double>(height()).data());
             glMatrixMode(GL_MODELVIEW);
             glLoadIdentity();
             glDisable(GL_LIGHTING);
@@ -694,7 +863,7 @@ ModelViewWidget::paintGL()
     GLenum errorCode = glGetError();
     if (errorCode != GL_NO_ERROR)
     {
-        std::cout << "OpenGL error: " << gluErrorString(errorCode) << std::endl;
+        qWarning() << "OpenGL error:" << errorCode;
     }
 }
 
@@ -704,159 +873,6 @@ ModelViewWidget::resizeGL(int width, int height)
 {
     glViewport(0, 0, width, height);
 }
-
-
-static GLenum GLComponentTypes[Mesh::FormatMax] =
-{
-     GL_FLOAT,          // Float1
-     GL_FLOAT,          // Float2
-     GL_FLOAT,          // Float3
-     GL_FLOAT,          // Float4,
-     GL_UNSIGNED_BYTE,  // UByte4
-};
-
-static int GLComponentCounts[Mesh::FormatMax] =
-{
-     1,  // Float1
-     2,  // Float2
-     3,  // Float3
-     4,  // Float4,
-     4,  // UByte4
-};
-
-
-static void
-setVertexArrays(const Mesh::VertexDescription& desc, const void* vertexData)
-{
-    const Mesh::VertexAttribute& position  = desc.getAttribute(Mesh::Position);
-    const Mesh::VertexAttribute& normal    = desc.getAttribute(Mesh::Normal);
-    const Mesh::VertexAttribute& color0    = desc.getAttribute(Mesh::Color0);
-    const Mesh::VertexAttribute& texCoord0 = desc.getAttribute(Mesh::Texture0);
-    const Mesh::VertexAttribute& tangent   = desc.getAttribute(Mesh::Tangent);
-
-    // Can't render anything unless we have positions
-    if (position.format != Mesh::Float3)
-        return;
-
-    // Set up the vertex arrays
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, desc.stride,
-                    reinterpret_cast<const char*>(vertexData) + position.offset);
-
-    // Set up the normal array
-    switch (normal.format)
-    {
-    case Mesh::Float3:
-        glEnableClientState(GL_NORMAL_ARRAY);
-        glNormalPointer(GLComponentTypes[(int) normal.format],
-                        desc.stride,
-                        reinterpret_cast<const char*>(vertexData) + normal.offset);
-        break;
-    default:
-        glDisableClientState(GL_NORMAL_ARRAY);
-        break;
-    }
-
-    // Set up the color array
-    switch (color0.format)
-    {
-    case Mesh::Float3:
-    case Mesh::Float4:
-    case Mesh::UByte4:
-        glEnableClientState(GL_COLOR_ARRAY);
-        glColorPointer(GLComponentCounts[color0.format],
-                       GLComponentTypes[color0.format],
-                       desc.stride,
-                       reinterpret_cast<const char*>(vertexData) + color0.offset);
-        break;
-    default:
-        glDisableClientState(GL_COLOR_ARRAY);
-        break;
-    }
-
-    // Set up the texture coordinate array
-    switch (texCoord0.format)
-    {
-    case Mesh::Float1:
-    case Mesh::Float2:
-    case Mesh::Float3:
-    case Mesh::Float4:
-        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-        glTexCoordPointer(GLComponentCounts[(int) texCoord0.format],
-                          GLComponentTypes[(int) texCoord0.format],
-                          desc.stride,
-                          reinterpret_cast<const char*>(vertexData) + texCoord0.offset);
-        break;
-    default:
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-        break;
-    }
-
-    switch (tangent.format)
-    {
-    case Mesh::Float3:
-        glEnableVertexAttribArrayARB(TangentAttributeIndex);
-        glVertexAttribPointerARB(TangentAttributeIndex,
-                                      GLComponentCounts[(int) tangent.format],
-                                      GLComponentTypes[(int) tangent.format],
-                                      GL_FALSE,
-                                      desc.stride,
-                                      reinterpret_cast<const char*>(vertexData) + tangent.offset);
-        break;
-    default:
-        glDisableVertexAttribArrayARB(TangentAttributeIndex);
-        break;
-    }
-
-}
-
-
-// Set just the vertex pointer
-void
-setVertexPointer(const Mesh::VertexDescription& desc, const void* vertexData)
-{
-    const Mesh::VertexAttribute& position  = desc.getAttribute(Mesh::Position);
-
-    // Can't render anything unless we have positions
-    if (position.format != Mesh::Float3)
-        return;
-
-    // Set up the vertex arrays
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, desc.stride,
-                    reinterpret_cast<const char*>(vertexData) + position.offset);
-
-    glDisableClientState(GL_NORMAL_ARRAY);
-    glDisableClientState(GL_COLOR_ARRAY);
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    glDisableVertexAttribArrayARB(TangentAttributeIndex);
-}
-
-
-static GLenum
-getGLMode(Mesh::PrimitiveGroupType primitive)
-{
-    switch (primitive)
-    {
-    case Mesh::TriList:
-        return GL_TRIANGLES;
-    case Mesh::TriStrip:
-        return GL_TRIANGLE_STRIP;
-    case Mesh::TriFan:
-        return GL_TRIANGLE_FAN;
-    case Mesh::LineList:
-        return GL_LINES;
-    case Mesh::LineStrip:
-        return GL_LINE_STRIP;
-    case Mesh::PointList:
-        return GL_POINTS;
-    default:
-        return GL_POINTS;
-    }
-}
-
-
-static bool gl2Fail = false;
 
 
 void
@@ -888,23 +904,20 @@ ModelViewWidget::setAmbientLight(bool enable)
 void
 ModelViewWidget::setShadows(bool enable)
 {
-    if (!gl::EXT_framebuffer_object)
-    {
-        return;
-    }
-
     if (enable != m_shadowsEnabled)
     {
         m_shadowsEnabled = enable;
         if (m_shadowsEnabled && m_shadowBuffers.size() < 2)
         {
-            auto* fb0 = new GLFrameBufferObject(ShadowBufferSize, ShadowBufferSize, GLFrameBufferObject::DepthAttachment);
-            auto* fb1 = new GLFrameBufferObject(ShadowBufferSize, ShadowBufferSize, GLFrameBufferObject::DepthAttachment);
+            makeCurrent();
+            auto* fb0 = new FramebufferObject(ShadowBufferSize, ShadowBufferSize, FramebufferObject::DepthAttachment);
+            auto* fb1 = new FramebufferObject(ShadowBufferSize, ShadowBufferSize, FramebufferObject::DepthAttachment);
             m_shadowBuffers << fb0 << fb1;
             if (!fb0->isValid() || !fb1->isValid())
             {
                 qWarning("Error creating shadow buffers.");
             }
+            doneCurrent();
         }
 
         update();
@@ -913,14 +926,14 @@ ModelViewWidget::setShadows(bool enable)
 
 
 void
-ModelViewWidget::bindMaterial(const Material* material,
+ModelViewWidget::bindMaterial(const cmod::Material* material,
                               const LightingEnvironment* lighting,
-                              const Mesh::VertexDescription* vertexDesc)
+                              const cmod::VertexDescription* vertexDesc)
 {
-    GLShaderProgram* shader = nullptr;
+    GLProgram* shader = nullptr;
 
     ShaderKey shaderKey;
-    if (renderPath() == OpenGL2Path && !gl2Fail)
+    if (!gl2Fail)
     {
         shaderKey = ShaderKey::Create(material, lighting, vertexDesc);
 
@@ -942,63 +955,67 @@ ModelViewWidget::bindMaterial(const Material* material,
 
     if (shader)
     {
-        shader->bind();
+        shader->use();
 
-        shader->setUniformValue("modelView", cameraTransform().matrix().cast<float>());
+        setUniformValue(*shader, "modelView", cameraTransform().matrix().cast<float>());
 
-        shader->setUniformValue("diffuseColor", Vector3f(material->diffuse.red(), material->diffuse.green(), material->diffuse.blue()));
-        shader->setUniformValue("specularColor", Vector3f(material->specular.red(), material->specular.green(), material->specular.blue()));
-        shader->setUniformValue("opacity", material->opacity);
-        shader->setUniformValue("specularPower", material->specularPower);
+        setUniformValue(*shader, "diffuseColor", Eigen::Vector3f(material->diffuse.red(), material->diffuse.green(), material->diffuse.blue()));
+        setUniformValue(*shader, "specularColor", Eigen::Vector3f(material->specular.red(), material->specular.green(), material->specular.blue()));
+        setUniformValue(*shader, "opacity", material->opacity);
+        setUniformValue(*shader, "specularPower", material->specularPower);
 
         if (shaderKey.hasDiffuseMap())
         {
-            GLuint diffuseMapId = m_materialLibrary->getTexture(toQString(material->maps[Material::DiffuseMap]->source().c_str()));
+            GLuint diffuseMapId = m_materialLibrary->getTexture(
+                toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::DiffuseMap)).c_str()));
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, diffuseMapId);
-            shader->setSampler("diffuseMap", 0);
+            setSampler(*shader, "diffuseMap", 0);
         }
 
         if (shaderKey.hasNormalMap())
         {
-            GLuint normalMapId = m_materialLibrary->getTexture(toQString(material->maps[Material::NormalMap]->source().c_str()));
+            GLuint normalMapId = m_materialLibrary->getTexture(
+                toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::NormalMap)).c_str()));
             glActiveTexture(GL_TEXTURE1);
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, normalMapId);
-            shader->setSampler("normalMap", 1);
+            setSampler(*shader, "normalMap", 1);
             glActiveTexture(GL_TEXTURE0);
         }
 
         if (shaderKey.hasSpecularMap())
         {
-            GLuint specularMapId = m_materialLibrary->getTexture(toQString(material->maps[Material::SpecularMap]->source().c_str()));
+            GLuint specularMapId = m_materialLibrary->getTexture(
+                toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::SpecularMap)).c_str()));
             glActiveTexture(GL_TEXTURE2);
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, specularMapId);
-            shader->setSampler("specularMap", 2);
+            setSampler(*shader, "specularMap", 2);
             glActiveTexture(GL_TEXTURE0);
         }
 
         if (shaderKey.hasEmissiveMap())
         {
-            GLuint emissiveMapId = m_materialLibrary->getTexture(toQString(material->maps[Material::EmissiveMap]->source().c_str()));
+            GLuint emissiveMapId = m_materialLibrary->getTexture(
+                toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::EmissiveMap)).c_str()));
             glActiveTexture(GL_TEXTURE3);
             glEnable(GL_TEXTURE_2D);
             glBindTexture(GL_TEXTURE_2D, emissiveMapId);
-            shader->setSampler("emissiveMap", 3);
+            setSampler(*shader, "emissiveMap", 3);
             glActiveTexture(GL_TEXTURE0);
         }
 
         unsigned int lightIndex = 0;
-        Matrix3d lightMatrix = m_lightOrientation.toRotationMatrix();
+        Eigen::Matrix3d lightMatrix = m_lightOrientation.toRotationMatrix();
 
-        Vector3f lightDirections[8];
-        Vector3f lightColors[8];
+        Eigen::Vector3f lightDirections[8];
+        Eigen::Vector3f lightColors[8];
 
         foreach (LightSource lightSource, m_lightSources)
         {
-            Vector3d direction = lightMatrix * lightSource.direction;
-            Vector3f color = lightSource.color * lightSource.intensity;
+            Eigen::Vector3d direction = lightMatrix * lightSource.direction;
+            Eigen::Vector3f color = lightSource.color * lightSource.intensity;
 
             lightDirections[lightIndex] = direction.cast<float>();
             lightColors[lightIndex] = color;
@@ -1006,10 +1023,10 @@ ModelViewWidget::bindMaterial(const Material* material,
             lightIndex++;
         }
 
-        if (m_lightSources.size() > 0)
+        if (!m_lightSources.empty())
         {
-            shader->setUniformValueArray("lightDirection", lightDirections, m_lightSources.size());
-            shader->setUniformValueArray("lightColor", lightColors, m_lightSources.size());
+            setUniformValueArray(*shader, "lightDirection", lightDirections, m_lightSources.size());
+            setUniformValueArray(*shader, "lightColor", lightColors, m_lightSources.size());
         }
 
         float ambientLightLevel = 0.0f;
@@ -1017,11 +1034,11 @@ ModelViewWidget::bindMaterial(const Material* material,
         {
             ambientLightLevel = 0.2f;
         }
-        shader->setUniformValue("ambientLightColor", Vector3f::Constant(ambientLightLevel));
+        setUniformValue(*shader, "ambientLightColor", Eigen::Vector3f::Constant(ambientLightLevel));
 
         // Get the eye position in model space
-        Vector4f eyePosition = cameraTransform().inverse().cast<float>() * Vector4f::UnitW();
-        shader->setUniformValue("eyePosition", eyePosition.head(3));
+        Eigen::Vector4f eyePosition = cameraTransform().inverse().cast<float>() * Eigen::Vector4f::UnitW();
+        setUniformValue(*shader, "eyePosition", eyePosition.head(3));
 
         // Set all shadow related values
         if (shaderKey.shadowCount() > 0)
@@ -1038,19 +1055,20 @@ ModelViewWidget::bindMaterial(const Material* material,
                 glActiveTexture(GL_TEXTURE4 + i);
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, m_shadowBuffers[i]->depthTexture());
-                shader->setSampler(samplerName, 4 + i);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_R_TO_TEXTURE);
+                setSampler(*shader, samplerName, 4 + i);
                 glActiveTexture(GL_TEXTURE0);
             }
 
-            Matrix4f shadowMatrixes[MaxShadows];
-            Matrix4f bias = Matrix4f::Zero();
-            bias.diagonal() = Vector4f(0.5f, 0.5f, 0.5f, 1.0f);
-            bias.col(3) = Vector4f(0.5f, 0.5f, 0.5f, 1.0f);
+            Eigen::Matrix4f shadowMatrixes[MaxShadows];
+            Eigen::Matrix4f bias = Eigen::Matrix4f::Zero();
+            bias.diagonal() = Eigen::Vector4f(0.5f, 0.5f, 0.5f, 1.0f);
+            bias.col(3) = Eigen::Vector4f(0.5f, 0.5f, 0.5f, 1.0f);
 
             for (unsigned int i = 0; i < shaderKey.shadowCount(); ++i)
             {
-                Matrix4f modelView = directionalLightMatrix(lightDirections[i]);
-                Matrix4f projection = shadowProjectionMatrix(m_modelBoundingRadius);
+                Eigen::Matrix4f modelView = directionalLightMatrix(lightDirections[i]);
+                Eigen::Matrix4f projection = shadowProjectionMatrix(m_modelBoundingRadius);
                 shadowMatrixes[i] = bias * projection * modelView;
 
                 // TESTING ONLY:
@@ -1058,19 +1076,16 @@ ModelViewWidget::bindMaterial(const Material* material,
                 //shadowMatrixes[i].col(3).w() = 1.0f;
             }
 
-            shader->setUniformValueArray("shadowMatrix", shadowMatrixes, shaderKey.shadowCount());
+            setUniformValueArray(*shader, "shadowMatrix", shadowMatrixes, shaderKey.shadowCount());
         }
     }
     else
     {
-        if (GLShaderProgram::hasOpenGLShaderPrograms())
-        {
-            glUseProgram(0);
-        }
+        glUseProgram(0);
 
-        Vector4f diffuse(material->diffuse.red(), material->diffuse.green(), material->diffuse.blue(), material->opacity);
-        Vector4f specular(material->specular.red(), material->specular.green(), material->specular.blue(), 1.0f);
-        Vector4f emissive(material->emissive.red(), material->emissive.green(), material->emissive.blue(), 1.0f);
+        Eigen::Vector4f diffuse(material->diffuse.red(), material->diffuse.green(), material->diffuse.blue(), material->opacity);
+        Eigen::Vector4f specular(material->specular.red(), material->specular.green(), material->specular.blue(), 1.0f);
+        Eigen::Vector4f emissive(material->emissive.red(), material->emissive.green(), material->emissive.blue(), 1.0f);
         glMaterialfv(GL_FRONT, GL_DIFFUSE, diffuse.data());
         glMaterialfv(GL_FRONT, GL_AMBIENT, diffuse.data());
         glColor4fv(diffuse.data());
@@ -1080,9 +1095,10 @@ ModelViewWidget::bindMaterial(const Material* material,
 
         // Set up the diffuse (base) texture
         GLuint baseTexId = 0;
-        if (material->maps[Material::DiffuseMap])
+        if (material->getMap(cmod::TextureSemantic::DiffuseMap) != InvalidResource)
         {
-            baseTexId = m_materialLibrary->getTexture(toQString(material->maps[Material::DiffuseMap]->source().c_str()));
+            baseTexId = m_materialLibrary->getTexture(
+                toQString(cmodtools::GetPathManager()->getSource(material->getMap(cmod::TextureSemantic::DiffuseMap)).c_str()));
         }
 
         if (baseTexId != 0)
@@ -1111,10 +1127,10 @@ ModelViewWidget::bindMaterial(const Material* material,
 
 
 void
-ModelViewWidget::renderModel(Model* model)
+ModelViewWidget::renderModel(cmod::Model* model)
 {
-    Material defaultMaterial;
-    defaultMaterial.diffuse = Material::Color(1.0f, 1.0f, 1.0f);
+    cmod::Material defaultMaterial;
+    defaultMaterial.diffuse = cmod::Color(1.0f, 1.0f, 1.0f);
 
     glEnable(GL_CULL_FACE);
     if (m_renderStyle == WireFrameStyle)
@@ -1149,10 +1165,10 @@ ModelViewWidget::renderModel(Model* model)
         // Render all meshes
         for (unsigned int meshIndex = 0; meshIndex < model->getMeshCount(); ++meshIndex)
         {
-            const Mesh* mesh = model->getMesh(meshIndex);
+            const cmod::Mesh* mesh = model->getMesh(meshIndex);
 
             setVertexArrays(mesh->getVertexDescription(), mesh->getVertexData());
-            if (mesh->getVertexDescription().getAttribute(Mesh::Normal).format == Mesh::Float3)
+            if (mesh->getVertexDescription().getAttribute(cmod::VertexAttributeSemantic::Normal).format == cmod::VertexAttributeFormat::Float3)
             {
                 setLighting(true);
             }
@@ -1163,8 +1179,8 @@ ModelViewWidget::renderModel(Model* model)
 
             for (unsigned int groupIndex = 0; groupIndex < mesh->getGroupCount(); ++groupIndex)
             {
-                const Mesh::PrimitiveGroup* group = mesh->getGroup(groupIndex);
-                const Material* material = &defaultMaterial;
+                const cmod::PrimitiveGroup* group = mesh->getGroup(groupIndex);
+                const cmod::Material* material = &defaultMaterial;
                 if (group->materialIndex < model->getMaterialCount())
                 {
                      material = model->getMaterial(group->materialIndex);
@@ -1178,7 +1194,7 @@ ModelViewWidget::renderModel(Model* model)
                     bindMaterial(material, &lighting, &mesh->getVertexDescription());
 
                     GLenum primitiveMode = getGLMode(group->prim);
-                    glDrawElements(primitiveMode, group->nIndices, GL_UNSIGNED_INT, group->indices);
+                    glDrawElements(primitiveMode, group->indices.size(), GL_UNSIGNED_INT, group->indices.data());
                 }
             }
         }
@@ -1189,7 +1205,7 @@ ModelViewWidget::renderModel(Model* model)
 
 
 void
-ModelViewWidget::renderSelection(Model* model)
+ModelViewWidget::renderSelection(cmod::Model* model)
 {
     glEnable(GL_CULL_FACE);
     glPolygonMode(GL_FRONT, GL_LINE);
@@ -1200,28 +1216,25 @@ ModelViewWidget::renderSelection(Model* model)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
-    if (renderPath() == OpenGL2Path)
-    {
-        Material selectionMaterial;
-        selectionMaterial.diffuse = Material::Color(0.0f, 1.0f, 0.0f);
-        selectionMaterial.opacity = 0.5f;
+    cmod::Material selectionMaterial;
+    selectionMaterial.diffuse = cmod::Color(0.0f, 1.0f, 0.0f);
+    selectionMaterial.opacity = 0.5f;
 
-        LightingEnvironment lightsOff;
-        bindMaterial(&selectionMaterial, &lightsOff, nullptr);
-    }
+    LightingEnvironment lightsOff;
+    bindMaterial(&selectionMaterial, &lightsOff, nullptr);
 
     for (unsigned int meshIndex = 0; meshIndex < model->getMeshCount(); ++meshIndex)
     {
-        Mesh* mesh = model->getMesh(meshIndex);
+        cmod::Mesh* mesh = model->getMesh(meshIndex);
         setVertexPointer(mesh->getVertexDescription(), mesh->getVertexData());
 
         for (unsigned int groupIndex = 0; groupIndex < mesh->getGroupCount(); ++groupIndex)
         {
-            Mesh::PrimitiveGroup* group = mesh->getGroup(groupIndex);
+            cmod::PrimitiveGroup* group = mesh->getGroup(groupIndex);
             if (m_selection.contains(group))
             {
                 GLenum primitiveMode = getGLMode(group->prim);
-                glDrawElements(primitiveMode, group->nIndices, GL_UNSIGNED_INT, group->indices);
+                glDrawElements(primitiveMode, group->indices.size(), GL_UNSIGNED_INT, group->indices.data());
             }
         }
     }
@@ -1234,20 +1247,20 @@ ModelViewWidget::renderSelection(Model* model)
 
 
 void
-ModelViewWidget::renderDepthOnly(Model* model)
+ModelViewWidget::renderDepthOnly(cmod::Model* model)
 {
     glDepthMask(GL_TRUE);
 
     for (unsigned int meshIndex = 0; meshIndex < model->getMeshCount(); ++meshIndex)
     {
-        Mesh* mesh = model->getMesh(meshIndex);
+        cmod::Mesh* mesh = model->getMesh(meshIndex);
         setVertexPointer(mesh->getVertexDescription(), mesh->getVertexData());
 
         for (unsigned int groupIndex = 0; groupIndex < mesh->getGroupCount(); ++groupIndex)
         {
-            Mesh::PrimitiveGroup* group = mesh->getGroup(groupIndex);
+            cmod::PrimitiveGroup* group = mesh->getGroup(groupIndex);
             GLenum primitiveMode = getGLMode(group->prim);
-            glDrawElements(primitiveMode, group->nIndices, GL_UNSIGNED_INT, group->indices);
+            glDrawElements(primitiveMode, group->indices.size(), GL_UNSIGNED_INT, group->indices.data());
         }
     }
 }
@@ -1259,20 +1272,15 @@ ModelViewWidget::setupDefaultLightSources()
     m_lightSources.clear();
 
     LightSource light1;
-    light1.color = Vector3f(1.0f, 1.0f, 1.0f);
+    light1.color = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
     light1.intensity = 1.0f;
-    light1.direction = Vector3d(1.0, 1.0, 5.0).normalized();
+    light1.direction = Eigen::Vector3d(1.0, 1.0, 5.0).normalized();
 
-    LightSource light2;
-    light2.color = Vector3f(1.0f, 1.0f, 1.0f);
-    light2.intensity = 1.0f;
-    light2.direction = Vector3d(3.0, -3.0, -1.0).normalized();
-
-    m_lightSources << light1;// << light2;
+    m_lightSources << light1;
 }
 
 
-GLShaderProgram*
+GLProgram*
 ModelViewWidget::createShader(const ShaderKey& shaderKey)
 {
     QString vertexShaderSource;
@@ -1517,40 +1525,21 @@ ModelViewWidget::createShader(const ShaderKey& shaderKey)
         /*** End fragment shader ***/
     }
 
-    auto* glShader = new GLShaderProgram();
-    auto* vertexShader = new GLVertexShader();
-    if (!vertexShader->compile(vertexShaderSource.toStdString()))
+    GLProgram* glShader;
+    if (GLShaderLoader::CreateProgram(vertexShaderSource.toStdString(),
+                                      fragmentShaderSource.toStdString(),
+                                      &glShader) != GLShaderStatus::OK)
     {
-        qWarning("Vertex shader error: %s", vertexShader->log().c_str());
-        std::cerr << vertexShaderSource.toStdString() << std::endl;
-        delete vertexShader;
-        delete glShader;
+        qWarning("Failed to create GL program");
         return nullptr;
     }
 
-    auto* fragmentShader = new GLFragmentShader();
-    if (!fragmentShader->compile(fragmentShaderSource.toStdString()))
-    {
-        qWarning("Fragment shader error: %s", fragmentShader->log().c_str());
-        std::cerr << fragmentShaderSource.toStdString() << std::endl;
-        delete vertexShader;
-        delete fragmentShader;
-        delete glShader;
-        return nullptr;
-    }
-
-    glShader->addVertexShader(vertexShader);
-    glShader->addFragmentShader(fragmentShader);
     if (shaderKey.hasNormalMap())
-    {
-        glShader->bindAttributeLocation("tangentAtt", TangentAttributeIndex);
-    }
+        glBindAttribLocation(glShader->getID(), TangentAttributeIndex, "tangentAtt");
 
-    if (!glShader->link())
+    if (glShader->link() != GLShaderStatus::OK)
     {
-        qWarning("Shader link error: %s", glShader->log().c_str());
-        delete vertexShader;
-        delete fragmentShader;
+        qWarning("Failed to link shader");
         delete glShader;
         return nullptr;
     }
@@ -1569,11 +1558,16 @@ ModelViewWidget::renderShadow(unsigned int lightIndex)
         return;
     }
 
-    GLFrameBufferObject* shadowBuffer = m_shadowBuffers[lightIndex];
-    Vector3f lightDirection = (m_lightOrientation * m_lightSources[lightIndex].direction).cast<float>();
+    FramebufferObject* shadowBuffer = m_shadowBuffers[lightIndex];
+    Eigen::Vector3f lightDirection = (m_lightOrientation * m_lightSources[lightIndex].direction).cast<float>();
+
+    GLint oldFboId;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFboId);
 
     shadowBuffer->bind();
     glViewport(0, 0, shadowBuffer->width(), shadowBuffer->height());
+
+    glUseProgram(0);
 
     // Write only to the depth buffer
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -1585,7 +1579,6 @@ ModelViewWidget::renderShadow(unsigned int lightIndex)
     // Render backfaces only in order to reduce self-shadowing artifacts
     glCullFace(GL_FRONT);
 
-    glUseProgram(0);
     glDisable(GL_LIGHTING);
 
     glMatrixMode(GL_PROJECTION);
@@ -1593,12 +1586,13 @@ ModelViewWidget::renderShadow(unsigned int lightIndex)
     glMatrixMode(GL_MODELVIEW);
     glLoadMatrixf(directionalLightMatrix(lightDirection).data());
 
-    renderDepthOnly(m_model);
+    renderDepthOnly(m_model.get());
 
-    shadowBuffer->unbind();
+    shadowBuffer->unbind(oldFboId);
 
     // Re-enable the color buffer and culling
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glCullFace(GL_BACK);
 }
 
+} // end namespace cmodview

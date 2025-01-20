@@ -10,30 +10,14 @@
  *  $Id: dialog-options.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_DIALOG_OPTIONS_H
-#define GTK_DIALOG_OPTIONS_H
+#pragma once
 
 #include "common.h"
+
+namespace celestia::gtk
+{
 
 /* Entry Function */
 void dialogViewOptions(AppData* app);
 
-
-/* Local data */
-static const char * const ambientLabels[]=
-{
-    "None",
-    "Low",
-    "Medium",
-    NULL
-};
-
-static const char * const infoLabels[]=
-{
-    "None",
-    "Terse",
-    "Verbose",
-    NULL
-};
-
-#endif /* GTK_DIALOG_OPTIONS_H */
+} // end namespace celestia::gtk

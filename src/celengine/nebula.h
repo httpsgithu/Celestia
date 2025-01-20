@@ -1,5 +1,6 @@
 // nebula.h
 //
+// Copyright (C) 2003-present, the Celestia Development Team
 // Copyright (C) 2003, Chris Laurel <claurel@shatters.net>
 //
 // This program is free software; you can redistribute it and/or
@@ -7,33 +8,22 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef CELENGINE_NEBULA_H_
-#define CELENGINE_NEBULA_H_
+#pragma once
 
 #include <celutil/reshandle.h>
 #include <celengine/deepskyobj.h>
 
 class Nebula : public DeepSkyObject
 {
- public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
+public:
     Nebula() = default;
 
     const char* getType() const override;
     void setType(const std::string&) override;
     std::string getDescription() const override;
 
-    bool pick(const celmath::Ray3d& ray,
-              double& distanceToPicker,
-              double& cosAngleToBoundCenter) const override;
-    bool load(AssociativeArray*, const fs::path&) override;
-    void render(const Eigen::Vector3f& offset,
-                const Eigen::Quaternionf& viewerOrientation,
-                float brightness,
-                float pixelSize,
-                const Matrices& m,
-                Renderer* renderer) override;
+    // pick: the preconditional sphere-ray intersection test is enough for now
+    bool load(const AssociativeArray*, const fs::path&) override;
 
     uint64_t getRenderMask() const override;
     unsigned int getLabelMask() const override;
@@ -41,9 +31,8 @@ class Nebula : public DeepSkyObject
     void setGeometry(ResourceHandle);
     ResourceHandle getGeometry() const;
 
-    const char* getObjTypeName() const override;
+    DeepSkyObjectType getObjType() const override;
 
- public:
     enum NebulaType
     {
         Emissive           = 0,
@@ -56,8 +45,6 @@ class Nebula : public DeepSkyObject
         NotDefined         = 7
     };
 
- private:
+private:
     ResourceHandle geometry{ InvalidResource };
 };
-
-#endif // CELENGINE_NEBULA_H_

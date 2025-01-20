@@ -1,12 +1,7 @@
 set(CELENGINE_SOURCES
   asterism.cpp
   asterism.h
-  asterismrenderer.cpp
-  asterismrenderer.h
-  astro.cpp
-  astro.h
   astroobj.h
-  astroobj.cpp
   atmosphere.h
   axisarrow.cpp
   axisarrow.h
@@ -14,12 +9,10 @@ set(CELENGINE_SOURCES
   body.h
   boundaries.cpp
   boundaries.h
-  boundariesrenderer.cpp
-  boundariesrenderer.h
-  catalogxref.cpp
-  catalogxref.h
   category.cpp
   category.h
+  completion.cpp
+  completion.h
   console.cpp
   console.h
   constellation.cpp
@@ -28,16 +21,16 @@ set(CELENGINE_SOURCES
   curveplot.h
   deepskyobj.cpp
   deepskyobj.h
-  dispmap.cpp
-  dispmap.h
   dsodb.cpp
   dsodb.h
-  dsoname.cpp
-  dsoname.h
+  dsodbbuilder.cpp
+  dsodbbuilder.h
   dsooctree.cpp
   dsooctree.h
   dsorenderer.cpp
   dsorenderer.h
+  fisheyeprojectionmode.cpp
+  fisheyeprojectionmode.h
   frame.cpp
   frame.h
   framebuffer.cpp
@@ -46,9 +39,9 @@ set(CELENGINE_SOURCES
   frametree.h
   galaxy.cpp
   galaxy.h
+  galaxyform.cpp
+  galaxyform.h
   geometry.h
-  #glcontext.cpp
-  #glcontext.h
   glmarker.cpp
   globular.cpp
   globular.h
@@ -58,9 +51,6 @@ set(CELENGINE_SOURCES
   glsupport.h
   hash.cpp
   hash.h
-  #hdrfuncrender.cpp
-  image.cpp
-  image.h
   lightenv.h
   location.cpp
   location.h
@@ -84,6 +74,7 @@ set(CELENGINE_SOURCES
   observer.cpp
   observer.h
   octree.h
+  octreebuilder.h
   opencluster.cpp
   opencluster.h
   orbitsampler.h
@@ -95,16 +86,16 @@ set(CELENGINE_SOURCES
   parseobject.h
   parser.cpp
   parser.h
-#  particlesystem.cpp
-#  particlesystemfile.cpp
-#  particlesystemfile.h
-#  particlesystem.h
+  perspectiveprojectionmode.cpp
+  perspectiveprojectionmode.h
   planetgrid.cpp
   planetgrid.h
   pointstarrenderer.cpp
   pointstarrenderer.h
   pointstarvertexbuffer.cpp
   pointstarvertexbuffer.h
+  projectionmode.cpp
+  projectionmode.h
   rectangle.h
   referencemark.h
   rendcontext.cpp
@@ -124,7 +115,6 @@ set(CELENGINE_SOURCES
   shared.h
   simulation.cpp
   simulation.h
-  skygrid.cpp
   skygrid.h
   solarsys.cpp
   solarsys.h
@@ -138,6 +128,8 @@ set(CELENGINE_SOURCES
   star.h
   stardb.cpp
   stardb.h
+  stardbbuilder.cpp
+  stardbbuilder.h
   starname.cpp
   starname.h
   staroctree.cpp
@@ -147,25 +139,21 @@ set(CELENGINE_SOURCES
   surface.h
   texmanager.cpp
   texmanager.h
+  textlayout.cpp
+  textlayout.h
   texture.cpp
   texture.h
   timeline.cpp
   timeline.h
   timelinephase.cpp
   timelinephase.h
-  tokenizer.cpp
-  tokenizer.h
   trajmanager.cpp
   trajmanager.h
-  univcoord.cpp
   univcoord.h
   universe.cpp
   universe.h
   value.cpp
   value.h
-  vecgl.h
-  vertexobject.cpp
-  vertexobject.h
   viewporteffect.h
   viewporteffect.cpp
   virtualtex.cpp
@@ -175,3 +163,6 @@ set(CELENGINE_SOURCES
 )
 
 add_library(celengine OBJECT ${CELENGINE_SOURCES})
+
+gperf_add_table(celengine location.gperf location.cpp 4)
+gperf_add_table(celengine solarsys.gperf solarsys.cpp 4)

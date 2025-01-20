@@ -7,26 +7,123 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <cmath>
-#include <cassert>
-#include <cmath>
-#include <iostream>
-#include <fstream>
-#include <string>
-#include <utility>
-#include <celutil/debug.h>
-#include "glsupport.h"
-#include <celutil/debug.h>
-#include <celcompat/filesystem.h>
-#include <celutil/filetype.h>
-#include "parser.h"
-#include "tokenizer.h"
+
 #include "virtualtex.h"
 
+#include <cassert>
+#include <cstdio>
+#include <fstream>
+#include <optional>
+#include <system_error>
+#include <utility>
 
-using namespace std;
+#include <fmt/format.h>
 
-static const int MaxResolutionLevels = 13;
+#include <celengine/parser.h>
+#include <celutil/filetype.h>
+#include <celutil/logger.h>
+#include <celutil/tokenizer.h>
+
+
+using celestia::util::GetLogger;
+using celestia::engine::Image;
+
+namespace
+{
+
+constexpr int MaxResolutionLevels = 13;
+
+
+constexpr bool
+isPow2(int x)
+{
+    return ((x & (x - 1)) == 0);
+}
+
+
+std::unique_ptr<VirtualTexture>
+CreateVirtualTexture(const Hash* texParams,
+                     const fs::path& path)
+{
+    const std::string* imageDirectory = texParams->getString("ImageDirectory");
+    if (imageDirectory == nullptr)
+    {
+        GetLogger()->error("ImageDirectory missing in virtual texture.\n");
+        return nullptr;
+    }
+
+    std::optional<double> baseSplit = texParams->getNumber<double>("BaseSplit");
+    if (!baseSplit.has_value() || *baseSplit < 0.0 || *baseSplit != floor(*baseSplit))
+    {
+        GetLogger()->error("BaseSplit in virtual texture missing or has bad value\n");
+        return nullptr;
+    }
+
+    std::optional<double> tileSize = texParams->getNumber<double>("TileSize");
+    if (!tileSize.has_value())
+    {
+        GetLogger()->error("TileSize is missing from virtual texture\n");
+        return nullptr;
+    }
+
+    if (*tileSize != floor(*tileSize) ||
+        *tileSize < 64.0 ||
+        !isPow2((int) *tileSize))
+    {
+        GetLogger()->error("Virtual texture tile size must be a power of two >= 64\n");
+        return nullptr;
+    }
+
+    std::string tileType = "dds";
+    if (const std::string* tileTypeVal = texParams->getString("TileType"); tileTypeVal != nullptr)
+    {
+        tileType = *tileTypeVal;
+    }
+
+    std::string tilePrefix = "tx_";
+    if (const std::string* tilePrefixVal = texParams->getString("TilePrefix"); tilePrefixVal != nullptr)
+    {
+        tilePrefix = *tilePrefixVal;
+    }
+
+    // if absolute directory notation for ImageDirectory used,
+    // don't prepend the current add-on path.
+    fs::path directory(*imageDirectory);
+
+    if (directory.is_relative())
+        directory = path / directory;
+    return std::make_unique<VirtualTexture>(directory,
+                                            (unsigned int) *baseSplit,
+                                            (unsigned int) *tileSize,
+                                            tilePrefix,
+                                            tileType);
+}
+
+
+std::unique_ptr<VirtualTexture>
+LoadVirtualTexture(std::istream& in, const fs::path& path)
+{
+    Tokenizer tokenizer(&in);
+    Parser parser(&tokenizer);
+
+    tokenizer.nextToken();
+    if (auto tokenValue = tokenizer.getNameValue(); tokenValue != "VirtualTexture")
+    {
+        return nullptr;
+    }
+
+    const Value texParamsValue = parser.readValue();
+    const Hash* texParams = texParamsValue.getHash();
+    if (texParams == nullptr)
+    {
+        GetLogger()->error("Error parsing virtual texture\n");
+        return nullptr;
+    }
+
+    return CreateVirtualTexture(texParams, path);
+}
+
+} // end unnamed namespace
 
 
 // Virtual textures are composed of tiles that are loaded from the hard drive
@@ -40,52 +137,31 @@ static const int MaxResolutionLevels = 13;
 // number of tiles at the lowest LOD.  It is the log base 2 of the width in
 // tiles of LOD zero.  Though it's not required
 
-static bool isPow2(int x)
-{
-    return ((x & (x - 1)) == 0);
-}
-
-
-#if 0
-// Useful if we want to use a packed quadtree to store tiles instead of
-// the currently implemented tree structure.
-static inline unsigned int lodOffset(unsigned int lod)
-{
-    return ((1 << (lod << 1)) - 1) & 0xaaaaaaaa;
-}
-#endif
-
-
 VirtualTexture::VirtualTexture(const fs::path& _tilePath,
                                unsigned int _baseSplit,
                                unsigned int _tileSize,
-                               const string& _tilePrefix,
-                               const string& _tileType) :
+                               const std::string& _tilePrefix,
+                               const std::string& _tileType) :
     Texture(_tileSize << (_baseSplit + 1), _tileSize << _baseSplit),
     tilePath(_tilePath),
     tilePrefix(_tilePrefix),
     baseSplit(_baseSplit),
-    tileSize(_tileSize),
     ticks(0),
     nResolutionLevels(0)
 {
-    assert(tileSize != 0 && isPow2(tileSize));
-    tileTree[0] = new TileQuadtreeNode();
-    tileTree[1] = new TileQuadtreeNode();
-    tileExt = fmt::sprintf(".%s", _tileType);
+    assert(_tileSize != 0 && isPow2(_tileSize));
+    tileExt = fmt::format(".{:s}", _tileType);
     populateTileTree();
 
-    if (DetermineFileType(tileExt) == Content_DXT5NormalMap)
+    if (DetermineFileType(tileExt, true) == ContentType::DXT5NormalMap)
         setFormatOptions(Texture::DXT5NormalMap);
 }
 
 
-const TextureTile VirtualTexture::getTile(int lod, int u, int v)
+TextureTile
+VirtualTexture::getTile(int lod, int u, int v)
 {
     tilesRequested++;
-#if 0
-    cout << "getTile(" << lod << ", " << u << ", " << v << ")\n";
-#endif
 
     lod += baseSplit;
 
@@ -96,22 +172,21 @@ const TextureTile VirtualTexture::getTile(int lod, int u, int v)
         return TextureTile(0);
     }
 
-    TileQuadtreeNode* node = tileTree[u >> lod];
-    Tile* tile = node->tile;
+    const TileQuadtreeNode* node = &tileTree[u >> lod];
+    Tile* tile = node->tile.get();
     unsigned int tileLOD = 0;
 
     for (int n = 0; n < lod; n++)
     {
         unsigned int mask = 1 << (lod - n - 1);
         unsigned int child = (((v & mask) << 1) | (u & mask)) >> (lod - n - 1);
-        //int child = (((v << 1) | u) >> (lod - n - 1)) & 3;
         if (!node->children[child])
             break;
 
-        node = node->children[child];
+        node = node->children[child].get();
         if (node->tile != nullptr)
         {
-            tile = node->tile;
+            tile = node->tile.get();
             tileLOD = n + 1;
         }
     }
@@ -145,89 +220,83 @@ const TextureTile VirtualTexture::getTile(int lod, int u, int v)
     texU = (u & ((1 << lodDiff) - 1)) * texDU;
     texV = (v & ((1 << lodDiff) - 1)) * texDV;
 
-#if 0
-    cout << "Tile: " << tile->tex->getName() << ", " <<
-        texU << ", " << texV << ", " << texDU << ", " << texDV << '\n';
-#endif
     return TextureTile(tile->tex->getName(), texU, texV, texDU, texDV);
 }
 
 
-void VirtualTexture::bind()
+void
+VirtualTexture::bind()
 {
     // Treating a virtual texture like an ordinary one will not work; this is a
     // weakness in the class hierarchy.
 }
 
 
-int VirtualTexture::getLODCount() const
+int
+VirtualTexture::getLODCount() const
 {
     return nResolutionLevels - baseSplit;
 }
 
 
-int VirtualTexture::getUTileCount(int lod) const
+int
+VirtualTexture::getUTileCount(int lod) const
 {
     return 2 << (lod + baseSplit);
 }
 
 
-int VirtualTexture::getVTileCount(int lod) const
+int
+VirtualTexture::getVTileCount(int lod) const
 {
     return 1 << (lod + baseSplit);
 }
 
 
-void VirtualTexture::beginUsage()
+void
+VirtualTexture::beginUsage()
 {
     ticks++;
     tilesRequested = 0;
 }
 
 
-void VirtualTexture::endUsage()
+void
+VirtualTexture::endUsage()
 {
 }
 
 
-#if 0
-unsigned int VirtualTexture::tileIndex(unsigned int lod,
-                               unsigned int u, unsigned int v)
-{
-    unsigned int lodBase = lodOffset(lod + baseSplit) - lodOffset(baseSplit);
-    return lodBase + (v << (lod << 1)) + u;
-}
-#endif
-
-
-ImageTexture* VirtualTexture::loadTileTexture(unsigned int lod, unsigned int u, unsigned int v)
+std::unique_ptr<ImageTexture>
+VirtualTexture::loadTileTexture(unsigned int lod, unsigned int u, unsigned int v)
 {
     lod >>= baseSplit;
     assert(lod < (unsigned)MaxResolutionLevels);
 
-    auto path = tilePath /
-                fmt::sprintf("level%d", lod) /
-                fmt::sprintf("%s%d_%d%s", tilePrefix, u, v, tileExt.string());
+    auto filename = fs::u8path(fmt::format("{}{}_{}", tilePrefix, u, v));
+    filename += tileExt;
 
-    Image* img = LoadImageFromFile(path);
+    auto path = tilePath /
+                fmt::format("level{:d}", lod) /
+                filename;
+
+    auto img = Image::load(path);
     if (img == nullptr)
         return nullptr;
 
-    ImageTexture* tex = nullptr;
+    std::unique_ptr<ImageTexture> tex = nullptr;
 
     // Only use mip maps for the LOD 0; for higher LODs, the function of mip
     // mapping is built into the texture.
     MipMapMode mipMapMode = lod == 0 ? DefaultMipMaps : NoMipMaps;
 
     if (isPow2(img->getWidth()) && isPow2(img->getHeight()))
-        tex = new ImageTexture(*img, EdgeClamp, mipMapMode);
+        tex = std::make_unique<ImageTexture>(*img, EdgeClamp, mipMapMode);
 
     // TODO: Virtual textures can have tiles in different formats, some
     // compressed and some not. The compression flag doesn't make much
     // sense for them.
     compressed = img->isCompressed();
-
-    delete img;
 
     return tex;
 }
@@ -241,7 +310,6 @@ void VirtualTexture::makeResident(Tile* tile, unsigned int lod, unsigned int u, 
         tile->tex = loadTileTexture(lod, u, v);
         if (tile->tex == nullptr)
         {
-            // cout << "Texture load failed!\n";
             tile->loadFailed = true;
         }
     }
@@ -253,34 +321,34 @@ void VirtualTexture::populateTileTree()
     // Count the number of resolution levels present
     unsigned int maxLevel = 0;
 
-    // Crash potential if the tile prefix contains a %, so disallow it
-    string pattern;
-    if (tilePrefix.find('%') == string::npos)
-        pattern = tilePrefix + "%d_%d.";
-
     for (int i = 0; i < MaxResolutionLevels; i++)
     {
-        fs::path path = tilePath / fmt::sprintf("level%d", i);
+        fs::path path = tilePath / fmt::format("level{:d}", i);
         std::error_code ec;
-        if (fs::is_directory(path, ec))
-        {
-            maxLevel = i + baseSplit;
-            int uLimit = 2 << maxLevel;
-            int vLimit = 1 << maxLevel;
+        if (!fs::is_directory(path, ec))
+            continue;
 
-            for (auto& d : fs::directory_iterator(path, ec))
-            {
-                int u = -1, v = -1;
-                if (sscanf(d.path().filename().string().c_str(), pattern.c_str(), &u, &v) == 2)
-                {
-                    if (u >= 0 && v >= 0 && u < uLimit && v < vLimit)
-                    {
-                        // Found a tile, so add it to the quadtree
-                        Tile* tile = new Tile();
-                        addTileToTree(tile, maxLevel, (unsigned int) u, (unsigned int) v);
-                    }
-                }
-            }
+        maxLevel = i + baseSplit;
+        int uLimit = 2 << maxLevel;
+        int vLimit = 1 << maxLevel;
+
+        for (const auto& d : fs::directory_iterator(path, ec))
+        {
+            if (!fs::is_regular_file(d, ec))
+                continue;
+
+            int u = -1;
+            int v = -1;
+            if (auto filename = d.path().filename().string();
+                filename.size() < tilePrefix.size()
+                || std::string_view{filename.data(), tilePrefix.size()} != tilePrefix
+                || std::sscanf(filename.c_str() + tilePrefix.size(), "%d_%d.", &u, &v) != 2
+                || u < 0 || u >= uLimit
+                || v < 0 || v >= vLimit)
+                continue;
+
+            // Found a tile, so add it to the quadtree
+            addTileToTree(std::make_unique<Tile>(), maxLevel, (unsigned int) u, (unsigned int) v);
         }
     }
 
@@ -288,117 +356,34 @@ void VirtualTexture::populateTileTree()
 }
 
 
-void VirtualTexture::addTileToTree(Tile* tile, unsigned int lod, unsigned int u, unsigned int v)
+void
+VirtualTexture::addTileToTree(std::unique_ptr<Tile> tile, unsigned int lod, unsigned int u, unsigned int v)
 {
-    TileQuadtreeNode* node = tileTree[u >> lod];
+    TileQuadtreeNode* node = &tileTree[u >> lod];
 
     for (unsigned int i = 0; i < lod; i++)
     {
         unsigned int mask = 1 << (lod - i - 1);
         unsigned int child = (((v & mask) << 1) | (u & mask)) >> (lod - i - 1);
         if (!node->children[child])
-            node->children[child] = new TileQuadtreeNode();
-        node = node->children[child];
+            node->children[child] = std::make_unique<TileQuadtreeNode>();
+        node = node->children[child].get();
     }
-#if 0
-    clog << "addTileToTree: " << node << ", " << lod << ", " << u << ", " << v << '\n';
-#endif
 
     // Verify that the tile doesn't already exist
     if (!node->tile)
-        node->tile = tile;
+        node->tile = std::move(tile);
 }
 
 
-static VirtualTexture* CreateVirtualTexture(Hash* texParams,
-                                            const fs::path& path)
+std::unique_ptr<VirtualTexture>
+LoadVirtualTexture(const fs::path& filename)
 {
-    string imageDirectory;
-    if (!texParams->getString("ImageDirectory", imageDirectory))
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "ImageDirectory missing in virtual texture.\n");
-        return nullptr;
-    }
-
-    double baseSplit = 0.0;
-    if (!texParams->getNumber("BaseSplit", baseSplit) ||
-        baseSplit < 0.0 || baseSplit != floor(baseSplit))
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "BaseSplit in virtual texture missing or has bad value\n");
-        return nullptr;
-    }
-
-    double tileSize = 0.0;
-    if (!texParams->getNumber("TileSize", tileSize))
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "TileSize is missing from virtual texture\n");
-        return nullptr;
-    }
-
-    if (tileSize != floor(tileSize) ||
-        tileSize < 64.0 ||
-        !isPow2((int) tileSize))
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "Virtual texture tile size must be a power of two >= 64\n");
-        return nullptr;
-    }
-
-    string tileType = "dds";
-    texParams->getString("TileType", tileType);
-
-    string tilePrefix = "tx_";
-    texParams->getString("TilePrefix", tilePrefix);
-
-    // if absolute directory notation for ImageDirectory used,
-    // don't prepend the current add-on path.
-    fs::path directory(imageDirectory);
-
-    if (directory.is_relative())
-        directory = path / directory;
-    return new VirtualTexture(directory,
-                              (unsigned int) baseSplit,
-                              (unsigned int) tileSize,
-                              tilePrefix,
-                              tileType);
-}
-
-
-static VirtualTexture* LoadVirtualTexture(istream& in, const fs::path& path)
-{
-    Tokenizer tokenizer(&in);
-    Parser parser(&tokenizer);
-
-    if (tokenizer.nextToken() != Tokenizer::TokenName)
-        return nullptr;
-
-    string virtTexString = tokenizer.getNameValue();
-    if (virtTexString != "VirtualTexture")
-        return nullptr;
-
-    Value* texParamsValue = parser.readValue();
-    if (texParamsValue == nullptr || texParamsValue->getType() != Value::HashType)
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "Error parsing virtual texture\n");
-        delete texParamsValue;
-        return nullptr;
-    }
-
-    Hash* texParams = texParamsValue->getHash();
-
-    VirtualTexture* virtualTex  = CreateVirtualTexture(texParams, path);
-    delete texParamsValue;
-
-    return virtualTex;
-}
-
-
-VirtualTexture* LoadVirtualTexture(const fs::path& filename)
-{
-    ifstream in(filename.string(), ios::in);
+    std::ifstream in(filename, std::ios::in);
 
     if (!in.good())
     {
-        //DPRINTF(LOG_LEVEL_ERROR, "Error opening virtual texture file: %s\n", filename.c_str());
+        GetLogger()->error("Error opening virtual texture file: {}\n", filename);
         return nullptr;
     }
 

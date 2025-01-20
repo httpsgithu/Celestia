@@ -1,9 +1,16 @@
 #pragma once
 
 #include <QDialog>
+
 #include "ui_gotoobjectdialog.h"
 
+class QString;
+class QWidget;
+
 class CelestiaCore;
+
+namespace celestia::qt
+{
 
 class GoToObjectDialog : public QDialog
 {
@@ -22,3 +29,5 @@ private:
 
     CelestiaCore *appCore;
 };
+
+} // end namespace celestia::qt

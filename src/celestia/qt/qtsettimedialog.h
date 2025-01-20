@@ -10,18 +10,20 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTSETTIMEDIALOG_H_
-#define _QTSETTIMEDIALOG_H_
+#pragma once
 
 #include <QDialog>
 
 class QAbstractItemModel;
-
 class QComboBox;
-class QSpinBox;
 class QDoubleSpinBox;
+class QSpinBox;
+class QWidget;
+
 class CelestiaCore;
 
+namespace celestia::qt
+{
 
 class SetTimeDialog : public QDialog
 {
@@ -59,4 +61,4 @@ Q_OBJECT
     QDoubleSpinBox* julianDateSpin;
 };
 
-#endif // _QTSETTIMEDIALOG_H_
+} // end namespace celestia::qt

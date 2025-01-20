@@ -1,5 +1,5 @@
-// qttxf - a Qt-based application to generate GLUT txf files from
-// system fonts
+// cmodview - An application for previewing cmod and other 3D file formats
+// supported by Celestia.
 //
 // Copyright (C) 2009, Chris Laurel <claurel@gmail.com>
 //
@@ -8,16 +8,32 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CMODVIEW_MAINWINDOW_H_
-#define _CMODVIEW_MAINWINDOW_H_
+#pragma once
 
-#include "modelviewwidget.h"
-#include "materialwidget.h"
-#include <QMainWindow>
-#include <QString>
-#include <QLabel>
+#include <memory>
+
 #include <QAction>
+#include <QCloseEvent>
+#include <QEvent>
+#include <QLabel>
+#include <QMainWindow>
+#include <QObject>
+#include <QString>
 
+
+
+namespace cmod
+{
+class Material;
+class Model;
+}
+
+
+namespace cmodview
+{
+
+class MaterialWidget;
+class ModelViewWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -25,7 +41,7 @@ class MainWindow : public QMainWindow
 
 public:
     MainWindow();
-    void setModel(const QString& filename, cmod::Model* model);
+    void setModel(const QString& filename, std::unique_ptr<cmod::Model>&& model);
     void setModelFileName(const QString& fileName);
     QString modelFileName() const
     {
@@ -50,7 +66,6 @@ public slots:
     void saveModel(const QString& saveFileName);
     void revertModel();
     void setRenderStyle(QAction* action);
-    void setRenderPath(QAction* action);
 
     void generateNormals();
     void generateTangents();
@@ -61,9 +76,6 @@ public slots:
     void updateSelectionInfo();
     void editBackgroundColor();
 
-private slots:
-    void initializeGL();
-
 private:
     ModelViewWidget* m_modelView;
     MaterialWidget* m_materialWidget;
@@ -71,8 +83,6 @@ private:
     QString m_modelFileName;
     QAction* m_saveAction;
     QAction* m_saveAsAction;
-    QAction* m_gl2Action;
 };
 
-#endif // _CMODVIEW_MAINWINDOW_H_
-
+} // end namespace cmodview

@@ -7,12 +7,23 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_VSOP87_H_
-#define _CELENGINE_VSOP87_H_
+#pragma once
 
-#include <string>
-#include "orbit.h"
+#include <memory>
 
-extern Orbit* CreateVSOP87Orbit(const std::string& name);
+namespace celestia::ephem
+{
 
-#endif // _CELENGINE_VSOP87_H_
+class Orbit;
+
+std::shared_ptr<const Orbit> CreateVSOP87MercuryOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87VenusOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87EarthOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87MarsOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87JupiterOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87SaturnOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87UranusOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87NeptuneOrbit();
+std::shared_ptr<const Orbit> CreateVSOP87SunOrbit();
+
+}

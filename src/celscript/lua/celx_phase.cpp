@@ -9,7 +9,7 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <assert.h>
+#include <cassert>
 #include "celx.h"
 #include "celx_internal.h"
 #include "celx_phase.h"
@@ -18,6 +18,8 @@
 #include <celephem/rotation.h>
 
 using namespace std;
+
+namespace astro = celestia::astro;
 
 int phase_new(lua_State* l, const TimelinePhase::SharedConstPtr& phase)
 {
@@ -113,7 +115,7 @@ static int phase_bodyframe(lua_State* l)
     celx.checkArgs(1, 1, "No arguments allowed for to phase:bodyframe");
 
     auto phase = this_phase(l);
-    auto f = phase->bodyFrame();
+    const auto& f = phase->bodyFrame();
     celx.newFrame(ObserverFrame(f));
 
     return 1;

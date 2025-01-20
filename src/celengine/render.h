@@ -8,43 +8,54 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_RENDER_H_
-#define _CELENGINE_RENDER_H_
+#pragma once
 
 #include <list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+
 #include <Eigen/Core>
+
+#include <celengine/body.h>
+#include <celengine/lightenv.h>
 #include <celengine/universe.h>
 #include <celengine/selection.h>
+#include <celengine/shadermanager.h>
 #include <celengine/starcolors.h>
+#include <celengine/projectionmode.h>
 #include <celengine/rendcontext.h>
 #include <celengine/renderlistentry.h>
-#include "vertexobject.h"
+#include <celengine/textlayout.h>
+#include <celimage/pixelformat.h>
+#include <celrender/rendererfwd.h>
 
-#ifdef USE_GLCONTEXT
-class GLContext;
-#endif
 class RendererWatcher;
 class FrameTree;
 class ReferenceMark;
 class CurvePlot;
 class PointStarVertexBuffer;
-class AsterismRenderer;
-class BoundariesRenderer;
 class Observer;
+class Surface;
 class TextureFont;
 class FramebufferObject;
 
 namespace celestia
 {
 class Rect;
+
+namespace gl
+{
+class Buffer;
+class VertexObject;
 }
 
-namespace celmath
+namespace math
 {
 class Frustum;
+class InfiniteFrustum;
+}
 }
 
 struct Matrices
@@ -53,20 +64,6 @@ struct Matrices
     const Eigen::Matrix4f *modelview;
 };
 
-struct LineStripEnd
-{
-    LineStripEnd(Eigen::Vector3f point, float scale) : point(point), scale(scale) {};
-    Eigen::Vector3f point;
-    float scale;
-};
-
-struct LineEnds
-{
-    LineEnds(Eigen::Vector3f point1, Eigen::Vector3f point2, float scale) : point1(point1), point2(point2), scale(scale) {};
-    Eigen::Vector3f point1;
-    Eigen::Vector3f point2;
-    float scale;
-};
 
 struct LightSource
 {
@@ -86,19 +83,6 @@ struct SecondaryIlluminator
 };
 
 
-enum class VOType
-{
-    Marker     = 0,
-    AxisArrow  = 1,
-    Rectangle  = 2,
-    Terminator = 3,
-    LargeStar  = 4,
-    AxisLetter = 5,
-    MarkerLine = 6,
-    Ecliptic   = 7,
-    Count      = 8,
-};
-
 enum class RenderMode
 {
     Fill = 0,
@@ -108,55 +92,60 @@ enum class RenderMode
 class Renderer
 {
  public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     Renderer();
     ~Renderer();
+
+    struct PipelineState
+    {
+        bool blending       { false };
+        bool scissor        { false };
+        bool multisample    { false };
+        bool depthMask      { false };
+        bool depthTest      { false };
+        bool smoothLines    { false };
+
+        struct
+        {
+            GLenum src      { GL_NONE };
+            GLenum dst      { GL_NONE };
+        } blendFunc;
+    };
 
     struct DetailOptions
     {
         DetailOptions();
-        unsigned int orbitPathSamplePoints;
-        unsigned int shadowTextureSize;
-        unsigned int eclipseTextureSize;
-        double orbitWindowEnd;
-        double orbitPeriodsShown;
-        double linearFadeFraction;
-    };
-
-    enum class ProjectionMode
-    {
-        PerspectiveMode = 0,
-        FisheyeMode     = 1
-    };
-
-#ifdef USE_GLCONTEXT
-    bool init(GLContext*, int, int, DetailOptions&);
-#else
-    bool init(int, int, DetailOptions&);
+        unsigned int orbitPathSamplePoints{ 100 };
+        unsigned int shadowTextureSize{ 256 };
+        unsigned int eclipseTextureSize{ 128 };
+        double orbitWindowEnd{ 0.5 };
+        double orbitPeriodsShown{ 1.0 };
+        double linearFadeFraction{ 0.0 };
+#ifndef GL_ES
+        bool useMesaPackInvert{ true };
 #endif
+    };
+
+    bool init(int, int, const DetailOptions&);
     void shutdown() {};
     void resize(int, int);
     float getAspectRatio() const;
 
-    float calcPixelSize(float fovY, float windowHeight);
     void setFaintestAM45deg(float);
     float getFaintestAM45deg() const;
+    void setRTL(bool);
+    bool isRTL() const;
 
     void setRenderMode(RenderMode);
-    void autoMag(float& faintestMag);
+    void autoMag(float& faintestMag, float zoom);
     void render(const Observer&,
                 const Universe&,
                 float faintestVisible,
                 const Selection& sel);
-    void draw(const Observer&,
-              const Universe&,
-              float faintestVisible,
-              const Selection& sel);
 
     bool getInfo(std::map<std::string, std::string>& info) const;
 
-    enum {
+    enum
+    {
         NoLabels            = 0x000,
         StarLabels          = 0x001,
         PlanetLabels        = 0x002,
@@ -206,8 +195,8 @@ class Renderer
         ShowEclipticGrid        = 0x0000000000800000,
         ShowHorizonGrid         = 0x0000000001000000,
         ShowEcliptic            = 0x0000000002000000,
-        ShowTintedIllumination  = 0x0000000004000000,
         // options added in 1.7
+        // removed flag         = 0x0000000004000000,
         ShowDwarfPlanets        = 0x0000000008000000,
         ShowMoons               = 0x0000000010000000,
         ShowMinorMoons          = 0x0000000020000000,
@@ -222,7 +211,6 @@ class Renderer
                                   ShowMinorMoons        |
                                   ShowAsteroids         |
                                   ShowComets            |
-                                  ShowPlanetRings       |
                                   ShowSpacecrafts,
         ShowDeepSpaceObjects    = ShowGalaxies          |
                                   ShowGlobulars         |
@@ -230,6 +218,7 @@ class Renderer
                                   ShowOpenClusters,
         DefaultRenderFlags      = ShowStars             |
                                   ShowSolarSystemObjects|
+                                  ShowPlanetRings       |
                                   ShowDeepSpaceObjects  |
                                   ShowCloudMaps         |
                                   ShowNightMaps         |
@@ -256,18 +245,20 @@ class Renderer
     void setRenderFlags(uint64_t);
     int getLabelMode() const;
     void setLabelMode(int);
-    ProjectionMode getProjectionMode() const;
-    void setProjectionMode(ProjectionMode);
+    std::shared_ptr<celestia::engine::ProjectionMode> getProjectionMode() const;
+    void setProjectionMode(std::shared_ptr<celestia::engine::ProjectionMode>);
     float getAmbientLightLevel() const;
     void setAmbientLightLevel(float);
+    float getTintSaturation() const;
+    void setTintSaturation(float);
     float getMinimumOrbitSize() const;
     void setMinimumOrbitSize(float);
     float getMinimumFeatureSize() const;
     void setMinimumFeatureSize(float);
     float getDistanceLimit() const;
     void setDistanceLimit(float);
-    int getOrbitMask() const;
-    void setOrbitMask(int);
+    BodyClassification getOrbitMask() const;
+    void setOrbitMask(BodyClassification);
     int getScreenDpi() const;
     void setScreenDpi(int);
     int getWindowWidth() const;
@@ -276,16 +267,12 @@ class Renderer
     float getScaleFactor() const;
     float getPointWidth() const;
     float getPointHeight() const;
-    float getLineWidthX() const;
-    float getLineWidthY() const;
-    float getRasterizedLineWidth(float multiplier) const;
-    bool shouldDrawLineAsTriangles(float multiplier = 1.0f) const;
 
     // GL wrappers
     void getViewport(int* x, int* y, int* w, int* h) const;
     void getViewport(std::array<int, 4>& viewport) const;
-    void setViewport(int x, int y, int w, int h) const;
-    void setViewport(const std::array<int, 4>& viewport) const;
+    void setViewport(int x, int y, int w, int h);
+    void setViewport(const std::array<int, 4>& viewport);
     void setScissor(int x, int y, int w, int h);
     void removeScissor();
 
@@ -293,43 +280,45 @@ class Renderer
     void disableMSAA() noexcept;
     bool isMSAAEnabled() const noexcept;
 
-    void enableBlending() noexcept;
-    void disableBlending() noexcept;
-    void setBlendingFactors(GLenum, GLenum) noexcept;
+    void setPipelineState(const PipelineState &ps) noexcept;
 
-    void enableDepthMask() noexcept;
-    void disableDepthMask() noexcept;
+    celestia::engine::PixelFormat getPreferredCaptureFormat() const noexcept;
 
-    void enableDepthTest() noexcept;
-    void disableDepthTest() noexcept;
-
-    celestia::PixelFormat getPreferredCaptureFormat() const noexcept;
-
-    void drawRectangle(const celestia::Rect& r, int fishEyeOverrideMode, const Eigen::Matrix4f& p, const Eigen::Matrix4f& m = Eigen::Matrix4f::Identity());
+    void drawRectangle(const celestia::Rect& r,
+                       FisheyeOverrideMode fishEyeOverrideMode,
+                       const Eigen::Matrix4f& p,
+                       const Eigen::Matrix4f& m = Eigen::Matrix4f::Identity()) const;
     void setRenderRegion(int x, int y, int width, int height, bool withScissor = true);
 
-    const ColorTemperatureTable* getStarColorTable() const;
-    void setStarColorTable(const ColorTemperatureTable*);
+    ColorTableType getStarColorTable() const;
+    void setStarColorTable(ColorTableType);
     [[deprecated]] bool getVideoSync() const;
     [[deprecated]] void setVideoSync(bool);
     void setSolarSystemMaxDistance(float);
     void setShadowMapSize(unsigned);
 
-    bool captureFrame(int, int, int, int, celestia::PixelFormat format, unsigned char*) const;
+    bool captureFrame(int, int, int, int, celestia::engine::PixelFormat format, unsigned char*) const;
 
     void renderMarker(celestia::MarkerRepresentation::Symbol symbol,
                       float size,
                       const Color &color,
                       const Matrices &m);
 
+    celestia::util::array_view<const Star*> getNearStars() const
+    {
+        return nearStars;
+    }
+
     const Eigen::Matrix4f& getModelViewMatrix() const
     {
         return m_modelMatrix;
     }
+
     const Eigen::Matrix4f& getProjectionMatrix() const
     {
         return m_projMatrix;
     }
+
     const Eigen::Matrix4f& getOrthoProjectionMatrix() const
     {
         return m_orthoProjMatrix;
@@ -345,6 +334,11 @@ class Renderer
         m_modelViewPtr = &m;
     }
 
+    void setDefaultModelViewMatrix()
+    {
+        m_modelViewPtr = &m_modelMatrix;
+    }
+
     const Eigen::Matrix4f& getCurrentProjectionMatrix() const
     {
         return *m_projectionPtr;
@@ -355,38 +349,35 @@ class Renderer
         m_projectionPtr = &m;
     }
 
-#ifdef USE_HDR
-    bool getBloomEnabled();
-    void setBloomEnabled(bool);
-    void increaseBrightness();
-    void decreaseBrightness();
-    float getBrightness();
-#endif
+    void setDefaultProjectionMatrix()
+    {
+        m_projectionPtr = &m_projMatrix;
+    }
 
-#ifdef USE_GLCONTEXT
-    GLContext* getGLContext() { return context; }
-#endif
+    void buildProjectionMatrix(Eigen::Matrix4f &mat, float nearZ, float farZ, float zoom) const;
 
     void setStarStyle(StarStyle);
     StarStyle getStarStyle() const;
     void setResolution(unsigned int resolution);
     unsigned int getResolution() const;
+    void enableSelectionPointer();
+    void disableSelectionPointer();
 
     void loadTextures(Body*);
 
     // Label related methods
-    enum LabelAlignment
+    enum class LabelHorizontalAlignment : std::uint8_t
     {
-        AlignCenter,
-        AlignLeft,
-        AlignRight
+        Center,
+        Start,
+        End,
     };
 
-    enum LabelVerticalAlignment
+    enum class LabelVerticalAlignment : std::uint8_t
     {
-        VerticalAlignCenter,
-        VerticalAlignBottom,
-        VerticalAlignTop,
+        Center,
+        Bottom,
+        Top,
     };
 
     struct Annotation
@@ -395,7 +386,7 @@ class Renderer
         const celestia::MarkerRepresentation* markerRep;
         Color color;
         Eigen::Vector3f position;
-        LabelAlignment halign : 3;
+        LabelHorizontalAlignment halign : 3;
         LabelVerticalAlignment valign : 3;
         float size;
 
@@ -403,40 +394,45 @@ class Renderer
     };
 
     void addForegroundAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                 const std::string& labelText,
+                                 std::string_view labelText,
                                  Color color,
                                  const Eigen::Vector3f& position,
-                                 LabelAlignment halign = AlignLeft,
-                                 LabelVerticalAlignment valign = VerticalAlignBottom,
+                                 LabelHorizontalAlignment halign = LabelHorizontalAlignment::Start,
+                                 LabelVerticalAlignment valign = LabelVerticalAlignment::Bottom,
                                  float size = 0.0f);
     void addBackgroundAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                 const std::string& labelText,
+                                 std::string_view labelText,
                                  Color color,
                                  const Eigen::Vector3f& position,
-                                 LabelAlignment halign = AlignLeft,
-                                 LabelVerticalAlignment valign = VerticalAlignBottom,
+                                 LabelHorizontalAlignment halign = LabelHorizontalAlignment::Start,
+                                 LabelVerticalAlignment valign = LabelVerticalAlignment::Bottom,
                                  float size = 0.0f);
     void addSortedAnnotation(const celestia::MarkerRepresentation* markerRep,
-                             const std::string& labelText,
+                             std::string_view labelText,
                              Color color,
                              const Eigen::Vector3f& position,
-                             LabelAlignment halign = AlignLeft,
-                             LabelVerticalAlignment valign = VerticalAlignBottom,
+                             LabelHorizontalAlignment halign = LabelHorizontalAlignment::Start,
+                             LabelVerticalAlignment valign = LabelVerticalAlignment::Bottom,
                              float size = 0.0f);
 
     ShaderManager& getShaderManager() const { return *shaderManager; }
 
-    celgl::VertexObject& getVertexObject(VOType, GLenum, GLsizeiptr, GLenum);
-
     // Callbacks for renderables; these belong in a special renderer interface
     // only visible in object's render methods.
     void beginObjectAnnotations();
-    void addObjectAnnotation(const celestia::MarkerRepresentation* markerRep, const std::string& labelText, Color, const Eigen::Vector3f&);
+    void addObjectAnnotation(const celestia::MarkerRepresentation* markerRep,
+                             std::string_view labelText,
+                             Color,
+                             const Eigen::Vector3f&,
+                             LabelHorizontalAlignment halign,
+                             LabelVerticalAlignment valign);
     void endObjectAnnotations();
-    const Eigen::Quaternionf& getCameraOrientation() const;
-    float getNearPlaneDistance() const;
+    Eigen::Quaternionf getCameraOrientationf() const;
+    Eigen::Quaterniond getCameraOrientation() const;
+    Eigen::Matrix3d getCameraTransform() const;
+    void setCameraTransform(const Eigen::Matrix3d&);
 
-    void clearAnnotations(std::vector<Annotation>&);
+    float getNearPlaneDistance() const;
 
     void invalidateOrbitCache();
 
@@ -472,21 +468,8 @@ class Renderer
     FramebufferObject* getShadowFBO(int) const;
 
  public:
-    // Internal types
-    // TODO: Figure out how to make these private.  Even with a friend
-    //
-    struct Particle
-    {
-        Eigen::Vector3f center;
-        float size;
-        Color color;
-        float pad0, pad1, pad2;
-    };
-
     struct RenderProperties
     {
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
         Surface* surface{ nullptr };
         const Atmosphere* atmosphere{ nullptr };
         RingSystem* rings{ nullptr };
@@ -497,52 +480,6 @@ class Renderer
         Eigen::Quaternionf orientation{ Eigen::Quaternionf::Identity() };
         LightingState::EclipseShadowVector* eclipseShadows;
     };
-
-#ifdef OCTREE_DEBUG
-    OctreeProcStats m_starProcStats;
-    OctreeProcStats m_dsoProcStats;
-#endif
- private:
-    struct SkyVertex
-    {
-        float x, y, z;
-        unsigned char color[4];
-    };
-
-    struct SkyContourPoint
-    {
-        Eigen::Vector3f v;
-        Eigen::Vector3f eyeDir;
-        float centerDist;
-        float eyeDist;
-        float cosSkyCapAltitude;
-    };
-
-    template <class OBJ> struct ObjectLabel
-    {
-        OBJ*        obj{ nullptr };
-        std::string label;
-
-        ObjectLabel(OBJ* _obj, const std::string& _label) :
-            obj  (_obj),
-            label(_label)
-        {};
-
-        ObjectLabel(const ObjectLabel& objLbl) :
-            obj  (objLbl.obj),
-            label(objLbl.label)
-        {};
-
-        ObjectLabel& operator = (const ObjectLabel& objLbl)
-        {
-            obj   = objLbl.obj;
-            label = objLbl.label;
-            return *this;
-        };
-    };
-
-    typedef ObjectLabel<Star>          StarLabel;
-    typedef ObjectLabel<DeepSkyObject> DSOLabel;    // currently not used
 
     struct DepthBufferPartition
     {
@@ -562,21 +499,20 @@ class Renderer
     void renderSkyGrids(const Observer& observer);
     void renderSelectionPointer(const Observer& observer,
                                 double now,
-                                const celmath::Frustum& viewFrustum,
+                                const celestia::math::InfiniteFrustum& viewFrustum,
                                 const Selection& sel);
 
     void renderAsterisms(const Universe&, float, const Matrices&);
     void renderBoundaries(const Universe&, float, const Matrices&);
-    void renderEclipticLine();
     void renderCrosshair(float size, double tsec, const Color &color, const Matrices &m);
 
     void buildNearSystemsLists(const Universe &universe,
                                const Observer &observer,
-                               const celmath::Frustum &xfrustum,
+                               const celestia::math::InfiniteFrustum &xfrustum,
                                double jd);
 
     void buildRenderLists(const Eigen::Vector3d& astrocentricObserverPos,
-                          const celmath::Frustum& viewFrustum,
+                          const celestia::math::InfiniteFrustum& viewFrustum,
                           const Eigen::Vector3d& viewPlaneNormal,
                           const Eigen::Vector3d& frameCenter,
                           const FrameTree* tree,
@@ -584,10 +520,10 @@ class Renderer
                           double now);
     void buildOrbitLists(const Eigen::Vector3d& astrocentricObserverPos,
                          const Eigen::Quaterniond& observerOrientation,
-                         const celmath::Frustum& viewFrustum,
+                         const celestia::math::InfiniteFrustum& viewFrustum,
                          const FrameTree* tree,
                          double now);
-    void buildLabelLists(const celmath::Frustum& viewFrustum,
+    void buildLabelLists(const celestia::math::InfiniteFrustum& viewFrustum,
                          double now);
     int buildDepthPartitions();
 
@@ -600,11 +536,11 @@ class Renderer
                                   const Observer& observer,
                                   double now);
 
-    void removeInvisibleItems(const celmath::Frustum &frustum);
+    void removeInvisibleItems(const celestia::math::InfiniteFrustum &frustum);
 
     void renderObject(const Eigen::Vector3f& pos,
                       float distance,
-                      double now,
+                      const Observer& observer,
                       float nearPlaneDistance,
                       float farPlaneDistance,
                       RenderProperties& obj,
@@ -623,7 +559,7 @@ class Renderer
                     const Eigen::Vector3f& pos,
                     float distance,
                     float appMag,
-                    double now,
+                    const Observer& observer,
                     float, float,
                     const Matrices&);
 
@@ -637,28 +573,25 @@ class Renderer
     void renderCometTail(const Body& body,
                          const Eigen::Vector3f& pos,
                          const Observer& observer,
+                         float dustTailLength,
                          float discSizeInPixels,
                          const Matrices&);
+
+    void calculatePointSize(float appMag,
+                            float size,
+                            float &discSize,
+                            float &alpha,
+                            float &glareSize,
+                            float &glareAlpha) const;
 
     void renderObjectAsPoint(const Eigen::Vector3f& center,
                              float radius,
                              float appMag,
-                             float _faintestMag,
                              float discSizeInPixels,
                              const Color& color,
                              bool useHalos,
                              bool emissive,
                              const Matrices&);
-
-    void renderEllipsoidAtmosphere(const Atmosphere& atmosphere,
-                                   const Eigen::Vector3f& center,
-                                   const Eigen::Quaternionf& orientation,
-                                   const Eigen::Vector3f& semiAxes,
-                                   const Eigen::Vector3f& sunDirection,
-                                   const LightingState& ls,
-                                   float fade,
-                                   bool lit,
-                                   const Matrices&);
 
     void locationsToAnnotations(const Body& body,
                                 const Eigen::Vector3d& bodyPosition,
@@ -679,26 +612,26 @@ class Renderer
 
     void labelConstellations(const AsterismList& asterisms,
                              const Observer& observer);
-    void renderParticles(const std::vector<Particle>& particles);
 
+    void getLabelAlignmentInfo(const Annotation &annotation, const TextureFont *font, celestia::engine::TextLayout::HorizontalAlignment &halign, float &hOffset, float &vOffset) const;
 
     void addAnnotation(std::vector<Annotation>&,
                        const celestia::MarkerRepresentation*,
-                       const std::string& labelText,
+                       std::string_view labelText,
                        Color color,
                        const Eigen::Vector3f& position,
-                       LabelAlignment halign = AlignLeft,
-                       LabelVerticalAlignment = VerticalAlignBottom,
+                       LabelHorizontalAlignment halign = LabelHorizontalAlignment::Start,
+                       LabelVerticalAlignment = LabelVerticalAlignment::Bottom,
                        float size = 0.0f,
                        bool special = false);
     void renderAnnotationMarker(const Annotation &a,
-                                FontStyle fs,
+                                celestia::engine::TextLayout &layout,
                                 float depth,
                                 const Matrices&);
     void renderAnnotationLabel(const Annotation &a,
-                               FontStyle fs,
-                               int hOffset,
-                               int vOffset,
+                               celestia::engine::TextLayout &layout,
+                               float hOffset,
+                               float vOffset,
                                float depth,
                                const Matrices&);
     void renderAnnotations(const std::vector<Annotation>&,
@@ -721,7 +654,7 @@ class Renderer
 
     bool selectionToAnnotation(const Selection &sel,
                                const Observer &observer,
-                               const celmath::Frustum &xfrustum,
+                               const celestia::math::InfiniteFrustum &xfrustum,
                                double now);
 
     void adjustMagnitudeInsideAtmosphere(float &faintestMag,
@@ -731,10 +664,9 @@ class Renderer
     void renderOrbit(const OrbitPathListEntry&,
                      double now,
                      const Eigen::Quaterniond& cameraOrientation,
-                     const celmath::Frustum& frustum,
+                     const celestia::math::Frustum& frustum,
                      float nearDist,
-                     float farDist,
-                     const Matrices&);
+                     float farDist);
 
     void renderSolarSystemObjects(const Observer &observer,
                                   int nIntervals,
@@ -744,64 +676,29 @@ class Renderer
 
     void createShadowFBO();
 
-    void enableSmoothLines();
-    void disableSmoothLines();
-
-#ifdef USE_HDR
  private:
-    int sceneTexWidth, sceneTexHeight;
-    GLfloat sceneTexWScale, sceneTexHScale;
-    GLsizei blurBaseWidth, blurBaseHeight;
-    GLuint sceneTexture;
-    Texture **blurTextures;
-    Texture *blurTempTexture;
-    GLuint gaussianLists[4];
-    GLint blurFormat;
-    bool useLuminanceAlpha;
-    bool bloomEnabled;
-    float maxBodyMag;
-    float exposure, exposurePrev;
-    float brightPlus;
-
-    void genBlurTexture(int blurLevel);
-    void genBlurTextures();
-    void genSceneTexture();
-    void renderToBlurTexture(int blurLevel);
-    void renderToTexture(const Observer& observer,
-                         const Universe& universe,
-                         float faintestMagNight,
-                         const Selection& sel);
-    void drawSceneTexture();
-    void drawBlur();
-    void drawGaussian3x3(float xdelta, float ydelta, GLsizei width, GLsizei height, float blend);
-    void drawGaussian5x5(float xdelta, float ydelta, GLsizei width, GLsizei height, float blend);
-    void drawGaussian9x9(float xdelta, float ydelta, GLsizei width, GLsizei height, float blend);
-    void drawBlendedVertices(float xdelta, float ydelta, float blend);
-#endif
-
- private:
-#ifdef USE_GLCONTEXT
-    GLContext* context;
-#endif
     ShaderManager* shaderManager{ nullptr };
 
     int windowWidth;
     int windowHeight;
     float fov;
-    double cosViewConeAngle;
+    double cosViewConeAngle{ 0.0 };
     int screenDpi;
     float corrFac;
     float pixelSize{ 1.0f };
     float faintestAutoMag45deg;
     std::vector<std::shared_ptr<TextureFont>> fonts{FontCount, nullptr};
 
-    ProjectionMode projectionMode;
+    std::shared_ptr<celestia::engine::ProjectionMode> projectionMode{ nullptr };
     int renderMode;
     int labelMode;
+    bool rtl{ false };
+    bool showSelectionPointer{ true };
     uint64_t renderFlags;
-    int bodyVisibilityMask{ ~0 };
-    int orbitMask;
-    float ambientLightLevel;
+    BodyClassification bodyVisibilityMask{ ~BodyClassification::EmptyMask };
+    BodyClassification orbitMask{ BodyClassification::Planet | BodyClassification::Moon | BodyClassification::Stellar };
+    float ambientLightLevel{ 0.1f };
+    float tintSaturation{ 0.5f };
     float brightnessBias;
 
     float brightnessScale{ 1.0f };
@@ -814,13 +711,13 @@ class Renderer
     Color ambientColor;
     std::string displayedSurface;
 
-    Eigen::Quaternionf m_cameraOrientation;
+    Eigen::Quaterniond m_cameraOrientation;
+    Eigen::Matrix3d m_cameraTransform{ Eigen::Matrix3d::Identity() };
     PointStarVertexBuffer* pointStarVertexBuffer;
     PointStarVertexBuffer* glareVertexBuffer;
     std::vector<RenderListEntry> renderList;
     std::vector<SecondaryIlluminator> secondaryIlluminators;
     std::vector<DepthBufferPartition> depthPartitions;
-    std::vector<Particle> glareParticles;
     std::vector<Annotation> backgroundAnnotations;
     std::vector<Annotation> foregroundAnnotations;
     std::vector<Annotation> depthSortedAnnotations;
@@ -846,20 +743,11 @@ class Renderer
 
     int currentIntervalIndex{ 0 };
 
-    struct State
-    {
-        bool blending    : 1;
-        bool scissor     : 1;
-        bool multisample : 1;
-        bool depthMask   : 1;
-        bool depthTest   : 1;
+    PipelineState m_pipelineState;
 
-        GLenum sfactor, dfactor; // blending
-    };
-    State m_GLState { false, false, false, false, false };
+    std::array<int, 4> m_viewport { 0, 0, 0, 0 };
 
- private:
-    typedef std::map<const Orbit*, CurvePlot*> OrbitCache;
+    typedef std::map<const celestia::ephem::Orbit*, CurvePlot*> OrbitCache;
     OrbitCache orbitCache;
     uint32_t lastOrbitCacheFlush;
 
@@ -868,18 +756,12 @@ class Renderer
     float minFeatureSize;
     uint64_t locationFilter;
 
-    SkyVertex* skyVertices;
-    uint32_t* skyIndices;
-    SkyContourPoint* skyContour;
-
-    const ColorTemperatureTable* colorTemp;
+    ColorTemperatureTable starColors{ ColorTableType::Blackbody_D65 };
+    ColorTemperatureTable tintColors{ ColorTableType::SunWhite };
 
     Selection highlightObject;
 
     bool settingsChanged;
-
-    AsterismRenderer* m_asterismRenderer { nullptr };
-    BoundariesRenderer* m_boundariesRenderer { nullptr };
 
     // True if we're in between a begin/endObjectAnnotations
     bool objectAnnotationSetOpen;
@@ -895,7 +777,26 @@ class Renderer
     unsigned m_shadowMapSize { 0 };
     std::unique_ptr<FramebufferObject> m_shadowFBO;
 
-    std::array<celgl::VertexObject*, static_cast<size_t>(VOType::Count)> m_VertexObjects;
+    std::unique_ptr<celestia::gl::VertexObject> m_markerVO;
+    std::unique_ptr<celestia::gl::Buffer> m_markerBO;
+    bool m_markerDataInitialized{ false };
+
+    // Saturation magnitude used to calculate a point star size
+    float satPoint;
+
+    std::unique_ptr<celestia::render::AsterismRenderer> m_asterismRenderer;
+    std::unique_ptr<celestia::render::BoundariesRenderer> m_boundariesRenderer;
+    std::unique_ptr<celestia::render::AtmosphereRenderer> m_atmosphereRenderer;
+    std::unique_ptr<celestia::render::CometRenderer> m_cometRenderer;
+    std::unique_ptr<celestia::render::EclipticLineRenderer> m_eclipticLineRenderer;
+    std::unique_ptr<celestia::render::GalaxyRenderer> m_galaxyRenderer;
+    std::unique_ptr<celestia::render::GlobularRenderer> m_globularRenderer;
+    std::unique_ptr<celestia::render::LargeStarRenderer> m_largeStarRenderer;
+    std::unique_ptr<celestia::render::LineRenderer> m_hollowMarkerRenderer;
+    std::unique_ptr<celestia::render::NebulaRenderer> m_nebulaRenderer;
+    std::unique_ptr<celestia::render::OpenClusterRenderer> m_openClusterRenderer;
+    std::unique_ptr<celestia::render::RingRenderer> m_ringRenderer;
+    std::unique_ptr<celestia::render::SkyGridRenderer> m_skyGridRenderer;
 
     // Location markers
  public:
@@ -911,7 +812,6 @@ class Renderer
 
     std::list<RendererWatcher*> watchers;
 
- public:
     // Colors for all lines and labels
     static Color StarLabelColor;
     static Color PlanetLabelColor;
@@ -954,6 +854,8 @@ class Renderer
     static Color EclipticColor;
 
     static Color SelectionCursorColor;
+
+    friend class PointStarRenderer;
 };
 
 
@@ -965,6 +867,3 @@ class RendererWatcher
 
     virtual void notifyRenderSettingsChanged(const Renderer*) = 0;
 };
-
-
-#endif // _CELENGINE_RENDER_H_

@@ -7,13 +7,13 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _SURFACE_H_
-#define _SURFACE_H_
+#pragma once
+
+#include <cstdint>
 
 #include <celutil/color.h>
 #include <celutil/reshandle.h>
 #include "multitexture.h"
-
 
 class Surface
 {
@@ -27,9 +27,6 @@ class Surface
         nightTexture(),
         overlayTexture(),
         bumpHeight(0.0f),
-#ifdef USE_HDR
-        nightLightRadiance(1.e-5f*.5f),
-#endif
         lunarLambert(0.0f)
     {};
 
@@ -46,7 +43,7 @@ class Surface
         ApplyOverlay         = 0x200,
     };
 
-    uint32_t appearanceFlags;
+    std::uint32_t appearanceFlags;
     Color color;
     Color specularColor;
     float specularPower;
@@ -57,10 +54,4 @@ class Surface
     MultiResTexture overlayTexture; // overlay texture, applied last
     float bumpHeight;               // scale of bump map relief
     float lunarLambert;             // mix between Lambertian and Lommel-Seeliger (lunar-like) photometric functions
-#ifdef USE_HDR
-    float nightLightRadiance;       // W sr^-1 m^-2
-#endif
 };
-
-#endif // _SURFACE_H_
-

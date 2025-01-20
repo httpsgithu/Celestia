@@ -8,185 +8,400 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
-#include <fstream>  // ifstream
-#include <iostream> // ios
-#include <celengine/image.h>
-#include <celutil/bytes.h>
-#include <celutil/debug.h>
+#include <fstream>
+#include <istream>
+#include <memory>
+#include <type_traits>
+#include <vector>
 
-using std::ifstream;
-using std::ios;
-using celestia::PixelFormat;
+#include <celutil/array_view.h>
+#include <celutil/binaryread.h>
+#include <celutil/gettext.h>
+#include <celutil/logger.h>
+#include "image.h"
 
+using celestia::util::GetLogger;
+
+namespace celestia::engine
+{
 namespace
 {
+
+#pragma pack(push, 1)
+
 // BMP file definitions--can't use windows.h because we might not be
 // built on Windows!
-typedef struct
+struct BMPFileHeader
 {
+    BMPFileHeader() = delete;
+
     unsigned char magic[2];
-    uint32_t size;
-    uint32_t reserved;
-    uint32_t offset;
-} BMPFileHeader;
+    std::uint32_t size;
+    std::uint16_t reserved1;
+    std::uint16_t reserved2;
+    std::uint32_t offset;
+};
 
-typedef struct
+struct BMPInfoHeader
 {
-    uint32_t size;
-    int32_t width;
-    int32_t height;
-    uint16_t planes;
-    uint16_t bpp;
-    uint32_t compression;
-    uint32_t imageSize;
-    int32_t widthPPM;
-    int32_t heightPPM;
-    uint32_t colorsUsed;
-    uint32_t colorsImportant;
-} BMPImageHeader;
+    BMPInfoHeader() = delete;
 
+    std::uint32_t size;
+    std::int32_t width;
+    std::int32_t height;
+    std::uint16_t planes;
+    std::uint16_t bpp;
+    std::uint32_t compression;
+    std::uint32_t imageSize;
+    std::int32_t widthPPM;
+    std::int32_t heightPPM;
+    std::uint32_t colorsUsed;
+    std::uint32_t colorsImportant;
+};
 
-int32_t readInt32(ifstream& in)
+#pragma pack(pop)
+
+static_assert(std::is_standard_layout_v<BMPFileHeader>);
+static_assert(std::is_standard_layout_v<BMPInfoHeader>);
+
+static_assert(sizeof(BMPInfoHeader) == 40);
+
+// We do not support 16bpp images
+constexpr std::array<std::uint32_t, 6> validBpps
 {
-    uint8_t b[4];
-    in.read(reinterpret_cast<char*>(b), 4);
-    int32_t val = ((int32_t) b[3] << 24) +
-                  ((int32_t) b[2] << 16) +
-                  ((int32_t) b[1] << 8) +
-                  ((int32_t) b[0]);
-    LE_TO_CPU_INT32(val, val);
-    return val;
-}
+    1, 2, 4, 8, 24, 32,
+};
 
-int16_t readInt16(ifstream& in)
+constexpr std::array<std::size_t, 5> validHeaderSizes
 {
-    uint8_t b[2];
-    in.read(reinterpret_cast<char*>(b), 2);
-    int16_t val = ((int16_t) b[1] << 8) + (int16_t) b[0];
-    LE_TO_CPU_INT16(val, val);
-    return val;
-}
+    40,  // BITMAPINFOHEADER
+    52,  // BITMAPV2INFOHEADER (Adobe Photoshop)
+    56,  // BITMAPV3INFOHEADER (Adobe Photoshop)
+    108, // BITMAPV4HEADER (Windows NT 4.0, 95 or later)
+    124, // BITMAPV5HEADER (GIMP)
+};
 
-
-Image* LoadBMPImage(ifstream& in)
+struct PaletteEntry
 {
-    BMPFileHeader fileHeader;
-    BMPImageHeader imageHeader;
-    uint8_t* pixels;
+    std::uint8_t blue;
+    std::uint8_t green;
+    std::uint8_t red;
+    std::uint8_t reserved;
+};
 
-    in >> fileHeader.magic[0];
-    in >> fileHeader.magic[1];
-    fileHeader.size = readInt32(in);
-    fileHeader.reserved = readInt32(in);
-    fileHeader.offset = readInt32(in);
+static_assert(std::is_trivially_copyable_v<PaletteEntry> && alignof(PaletteEntry) == 1);
 
-    if (fileHeader.magic[0] != 'B' || fileHeader.magic[1] != 'M')
-        return nullptr;
+struct BMPInfo
+{
+    std::uint32_t fileSize{ 0 };
+    std::uint32_t offset{ 0 };
+    std::uint32_t infoSize{ 0 };
+    std::int32_t width{ 0 };
+    std::int32_t height{ 0 };
+    std::uint32_t bpp{ 0 };
+    std::uint32_t rowStride{ 0 };
+    std::uint32_t imageSize{ 0 };
+    std::uint32_t paletteMax{ 0 };
+    std::uint32_t paletteCount{ 0 };
+    std::vector<PaletteEntry> palette;
+};
 
-    imageHeader.size = readInt32(in);
-    imageHeader.width = readInt32(in);
-    imageHeader.height = readInt32(in);
-    imageHeader.planes = readInt16(in);
-    imageHeader.bpp = readInt16(in);
-    imageHeader.compression = readInt32(in);
-    imageHeader.imageSize = readInt32(in);
-    imageHeader.widthPPM = readInt32(in);
-    imageHeader.heightPPM = readInt32(in);
-    imageHeader.colorsUsed = readInt32(in);
-    imageHeader.colorsImportant = readInt32(in);
-
-    if (imageHeader.width <= 0 || imageHeader.height <= 0)
-        return nullptr;
-
-    // We currently don't support compressed BMPs
-    if (imageHeader.compression != 0)
-        return nullptr;
-    // We don't handle 1-, 2-, or 4-bpp images
-    if (imageHeader.bpp != 8 && imageHeader.bpp != 24 && imageHeader.bpp != 32)
-        return nullptr;
-
-    uint8_t* palette = nullptr;
-    if (imageHeader.bpp == 8)
+bool
+parseBMPFileHeader(const char* fileHeader, BMPInfo& info, const fs::path& filename)
+{
+    if (fileHeader[0] != 'B' || fileHeader[1] != 'M')
     {
-        DPRINTF(LOG_LEVEL_DEBUG, "Reading %u color palette\n", imageHeader.colorsUsed);
-        palette = new uint8_t[imageHeader.colorsUsed * 4];
-        in.read(reinterpret_cast<char*>(palette), imageHeader.colorsUsed * 4);
+        GetLogger()->error(_("BMP read failure '{}' - incorrect header bytes\n"), filename);
+        return false;
     }
 
-    in.seekg(fileHeader.offset, ios::beg);
+    info.fileSize = util::fromMemoryLE<std::uint32_t>(fileHeader + offsetof(BMPFileHeader, size));
+    info.offset = util::fromMemoryLE<std::uint32_t>(fileHeader + offsetof(BMPFileHeader, offset));
+    return true;
+}
 
-    uint32_t bytesPerRow =
-        (imageHeader.width * imageHeader.bpp / 8 + 1) & ~1;
-    uint32_t imageBytes = bytesPerRow * imageHeader.height;
-
-    // slurp the image data
-    pixels = new uint8_t[imageBytes];
-    in.read(reinterpret_cast<char*>(pixels), imageBytes);
-
-    // check for truncated file
-
-    auto* img = new Image(PixelFormat::RGB, imageHeader.width, imageHeader.height);
-
-    // Copy the image and perform any necessary conversions
-    for (int32_t y = 0; y < imageHeader.height; y++)
+bool
+parseBMPInfoHeader(const char* infoHeader,
+                   BMPInfo& info,
+                   const fs::path& filename)
+{
+    info.infoSize = util::fromMemoryLE<std::uint32_t>(infoHeader + offsetof(BMPInfoHeader, size));
+    if (std::find(validHeaderSizes.begin(), validHeaderSizes.end(), info.infoSize) == validHeaderSizes.end())
     {
-        uint8_t* src = &pixels[y * bytesPerRow];
-        uint8_t* dst = img->getPixelRow(y);
+        GetLogger()->error(_("BMP read failure '{}' - unsupported header format\n"), filename);
+        return false;
+    }
 
-        switch (imageHeader.bpp)
+    info.width = util::fromMemoryLE<std::int32_t>(infoHeader + offsetof(BMPInfoHeader, width));
+    if (info.width <= 0 || info.width > Image::MAX_DIMENSION)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - width out of range\n"), filename);
+        return false;
+    }
+
+    info.height = util::fromMemoryLE<std::int32_t>(infoHeader + offsetof(BMPInfoHeader, height));
+    if (info.height <= 0 || info.height > Image::MAX_DIMENSION)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - height out of range\n"), filename);
+        return false;
+    }
+
+    if (auto planes = util::fromMemoryLE<std::uint16_t>(infoHeader + offsetof(BMPInfoHeader, planes));
+        planes != 1)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - number of planes must be 1\n"), filename);
+        return false;
+    }
+
+    info.bpp = util::fromMemoryLE<std::uint16_t>(infoHeader + offsetof(BMPInfoHeader, bpp));
+    // We don't handle 1-, 2-, or 4-bpp images
+    if (std::find(validBpps.begin(), validBpps.end(), info.bpp) == validBpps.end())
+    {
+        GetLogger()->error(_("BMP read failure '{}' - invalid bits per pixel {}\n"), filename, info.bpp);
+        return false;
+    }
+
+    // We currently don't support compressed BMPs
+    if (auto compression = util::fromMemoryLE<std::uint32_t>(infoHeader + offsetof(BMPInfoHeader, compression));
+        compression != 0)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - compressed images are not supported\n"), filename);
+        return false;
+    }
+
+    if (info.bpp > 8)
+    {
+        std::uint32_t factor = info.bpp >> 3;
+        info.rowStride = static_cast<std::uint32_t>(info.width) * factor;
+    }
+    else if (info.bpp == 8)
+    {
+        info.rowStride = static_cast<std::uint32_t>(info.width);
+    }
+    else
+    {
+        std::uint32_t factor = UINT32_C(8) / info.bpp;
+        info.rowStride = (static_cast<std::uint32_t>(info.width) + factor - UINT32_C(1)) / factor;
+    }
+
+    if (info.rowStride > UINT32_MAX - 3)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - image too wide\n"), filename);
+        return false;
+    }
+
+    // round up to nearest DWORD (4 bytes)
+    info.rowStride = (info.rowStride + UINT32_C(3)) & ~UINT32_C(3);
+
+    info.imageSize = info.rowStride * static_cast<std::uint32_t>(info.height);
+    // Uncompressed bitmaps can have a size of 0
+    if (auto size = util::fromMemoryLE<std::uint32_t>(infoHeader + offsetof(BMPInfoHeader, imageSize));
+        size != 0 && size != info.imageSize || (info.offset + info.imageSize) < info.fileSize)
+    {
+        GetLogger()->error(_("BMP read failure '{}' - size mismatch\n"), filename);
+        return false;
+    }
+
+    if (info.bpp <= 8)
+    {
+        info.paletteMax = UINT32_C(1) << info.bpp;
+        info.paletteCount = util::fromMemoryLE<std::uint32_t>(infoHeader + offsetof(BMPInfoHeader, colorsUsed));
+        if (info.paletteCount == 0)
         {
-        case 8:
-            for (int32_t x = 0; x < imageHeader.width; x++)
-            {
-                uint8_t* color = palette + (*src << 2);
-                dst[0] = color[2];
-                dst[1] = color[1];
-                dst[2] = color[0];
-                src++;
-                dst += 3;
-            }
-            break;
-        case 24:
-            for (int32_t x = 0; x < imageHeader.width; x++)
-            {
-                dst[0] = src[2];
-                dst[1] = src[1];
-                dst[2] = src[0];
-                src += 3;
-                dst += 3;
-            }
-            break;
-        case 32:
-            for (int32_t x = 0; x < imageHeader.width; x++)
-            {
-                dst[0] = src[2];
-                dst[1] = src[1];
-                dst[2] = src[0];
-                src += 4;
-                dst += 3;
-            }
-            break;
+            info.paletteCount = info.paletteMax;
+        }
+        else if (info.paletteCount > info.paletteMax)
+        {
+            GetLogger()->error(_("BMP read failure '{}' - palette too large\n"), filename);
+            return false;
         }
     }
 
-    delete[] pixels;
-    delete[] palette;
+    return true;
+}
+
+bool
+loadBMPHeaders(std::istream& in, BMPInfo& info, const fs::path& filename)
+{
+    std::array<char, sizeof(BMPFileHeader) + sizeof(BMPInfoHeader)> buffer;
+    if (!in.read(buffer.data(), buffer.size())) /* Flawfinder: ignore */
+    {
+        GetLogger()->error(_("BMP read failure '{}' - could not read file headers\n"), filename);
+        return false;
+    }
+
+    if (!parseBMPFileHeader(buffer.data(), info, filename))
+        return false;
+
+    if (!parseBMPInfoHeader(buffer.data() + sizeof(BMPFileHeader), info, filename))
+        return false;
+
+    if (info.bpp <= 8)
+    {
+        if (!in.seekg(sizeof(BMPFileHeader) + info.infoSize, std::ios_base::beg))
+        {
+            GetLogger()->error(_("BMP read failure '{}' - could not seek to palette\n"), filename);
+            return false;
+        }
+
+        // Fill palette with magenta to highlight out-of-range indices in the
+        // pixel data. We set the palette to the maximum size that can be
+        // addressed with the available bits to avoid needing to do range
+        // checks during processing.
+        info.palette.resize(info.paletteMax, PaletteEntry{ 255, 0, 255, 0 });
+        if (!in.read(reinterpret_cast<char*>(info.palette.data()), info.paletteCount * sizeof(PaletteEntry))) /* Flawfinder: ignore */
+        {
+            GetLogger()->error(_("BMP read failure '{}' - could not read palette\n"), filename);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void
+processRow(const std::uint8_t* src,
+           std::uint8_t* dst,
+           std::int32_t width,
+           std::size_t srcOffset)
+{
+    for (std::int32_t x = 0; x < width; ++x)
+    {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        src += srcOffset;
+        dst += 3;
+    }
+}
+
+void
+process8BppRow(const std::uint8_t* src,
+               std::uint8_t* dst,
+               std::int32_t width,
+               util::array_view<PaletteEntry> palette)
+{
+    for (std::int32_t x = 0; x < width; ++x)
+    {
+        const PaletteEntry& color = palette[*src];
+        dst[0] = color.red;
+        dst[1] = color.green;
+        dst[2] = color.blue;
+        ++src;
+        dst += 3;
+    }
+}
+
+void
+processLowBppRow(const std::uint8_t* src,
+                 std::uint8_t* dst,
+                 std::int32_t width,
+                 std::uint32_t bpp,
+                 util::array_view<PaletteEntry> palette)
+{
+    assert(bpp == 1 || bpp == 2 || bpp == 4);
+    const unsigned int mask = (1U << bpp) - 1U;
+    const unsigned int initalShift = 8U - bpp;
+    unsigned int shift = initalShift;
+    for (std::int32_t x = 0; x < width; ++x)
+    {
+        unsigned int idx = (*src >> shift) & mask;
+        const PaletteEntry& color = palette[idx];
+        dst[0] = color.red;
+        dst[1] = color.green;
+        dst[2] = color.blue;
+        if (shift > 0)
+        {
+            shift -= bpp;
+        }
+        else
+        {
+            shift = initalShift;
+            ++src;
+        }
+
+        dst += 3;
+    }
+}
+
+std::unique_ptr<Image>
+LoadBMPImage(std::istream& in, const fs::path& filename)
+{
+    BMPInfo info;
+    if (!loadBMPHeaders(in, info, filename))
+        return nullptr;
+
+    if (!in.seekg(info.offset, std::ios_base::beg))
+    {
+        GetLogger()->error(_("BMP read failure '{}' - could not seek to image data\n"), filename);
+        return nullptr;
+    }
+
+    // slurp the image data
+    std::vector<std::uint8_t> pixels(info.imageSize);
+    if (!in.read(reinterpret_cast<char*>(pixels.data()), info.imageSize)) /* Flawfinder: ignore */
+    {
+        GetLogger()->error(_("BMP read failure '{}' - could not read image data\n"), filename);
+        return nullptr;
+    }
+
+    auto img = std::make_unique<Image>(PixelFormat::RGB, info.width, info.height);
+
+    // Copy the image and perform any necessary conversions
+    const std::uint8_t* src = pixels.data();
+    for (std::int32_t y = info.height; y-- > 0;)
+    {
+        std::uint8_t* dst = img->getPixelRow(y);
+
+        switch (info.bpp)
+        {
+        case 1:
+        case 2:
+        case 4:
+            processLowBppRow(src, dst, info.width, info.bpp, info.palette);
+            break;
+
+        case 8:
+            process8BppRow(src, dst, info.width, info.palette);
+            break;
+
+        case 24:
+            processRow(src, dst, info.width, 3);
+            break;
+
+        case 32:
+            processRow(src, dst, info.width, 4);
+            break;
+
+        default:
+            assert(0);
+            break;
+        }
+
+        src += info.rowStride;
+    }
 
     return img;
 }
+
 } // anonymous namespace
 
-Image* LoadBMPImage(const fs::path& filename)
+Image*
+LoadBMPImage(const fs::path& filename)
 {
-    ifstream bmpFile(filename.string(), ios::in | ios::binary);
-
-    if (bmpFile.good())
+    std::ifstream bmpFile(filename, std::ios_base::in | std::ios_base::binary);
+    if (!bmpFile)
     {
-        Image* img = LoadBMPImage(bmpFile);
-        bmpFile.close();
-        return img;
+        GetLogger()->error(_("BMP read failure '{}' - could not open file\n"), filename);
+        return nullptr;
     }
 
-    return nullptr;
+    return LoadBMPImage(bmpFile, filename).release();
 }
+
+} // namespace celestia::engine

@@ -8,30 +8,33 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_ASTERISM_H_
-#define _CELENGINE_ASTERISM_H_
+#pragma once
 
+#include <iosfwd>
+#include <memory>
 #include <string>
 #include <vector>
-#include <iostream>
+
+#include <Eigen/Core>
+
 #include <celutil/color.h>
 
 class StarDatabase;
 
 class Asterism
 {
- public:
-    Asterism(std::string);
+public:
+    using Chain = std::vector<Eigen::Vector3f>;
+
+    Asterism(std::string&&, std::vector<Chain>&&);
     ~Asterism() = default;
-    Asterism() = delete;
+
     Asterism(const Asterism&) = delete;
-    Asterism(Asterism&&) = delete;
+    Asterism(Asterism&&) noexcept = default;
     Asterism& operator=(const Asterism&) = delete;
-    Asterism& operator=(Asterism&&) = delete;
+    Asterism& operator=(Asterism&&) noexcept = default;
 
-    typedef std::vector<Eigen::Vector3f> Chain;
-
-    std::string getName(bool i18n = false) const;
+    std::string_view getName(bool i18n = false) const;
     int getChainCount() const;
     const Chain& getChain(int) const;
 
@@ -43,20 +46,21 @@ class Asterism
     void unsetOverrideColor();
     bool isColorOverridden() const;
 
-    void addChain(Chain&);
+    const Eigen::Vector3f& averagePosition() const;
 
- private:
-    std::string name;
-    std::string i18nName;
-    std::vector<Chain*> chains;
-    Color color;
+private:
+    std::string m_name;
+#ifdef ENABLE_NLS
+    std::string m_i18nName;
+#endif
+    std::vector<Chain> m_chains;
+    Eigen::Vector3f m_averagePosition{ Eigen::Vector3f::Zero() };
+    Color m_color;
 
-    bool active             { true };
-    bool useOverrideColor   { false };
+    bool m_active           { true };
+    bool m_useOverrideColor { false };
 };
 
-typedef std::vector<Asterism*> AsterismList;
+using AsterismList = std::vector<Asterism>;
 
-AsterismList* ReadAsterismList(std::istream&, const StarDatabase&);
-
-#endif // _CELENGINE_ASTERISM_H_
+std::unique_ptr<AsterismList> ReadAsterismList(std::istream&, const StarDatabase&);

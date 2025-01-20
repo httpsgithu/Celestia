@@ -10,57 +10,106 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <QRadioButton>
-#include <QTreeView>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QGroupBox>
-#include <QDateEdit>
-#include <QComboBox>
-#include <QPushButton>
-#include <QStandardItemModel>
-#include <QMessageBox>
-#include <QProgressDialog>
-#include <QApplication>
-#include <QMenu>
-#include <vector>
-#include <algorithm>
-#include <cassert>
-#include <celestia/celestiacore.h>
-#include <celestia/eclipsefinder.h>
-#include <celmath/distance.h>
-#include <celmath/intersect.h>
-#include <celmath/geomutil.h>
-#include <celutil/gettext.h>
 #include "qteventfinder.h"
+#include "qtdateutil.h"
 
-using namespace Eigen;
-using namespace std;
-using namespace celmath;
+#include <algorithm>
+#include <array>
+#include <string>
+#include <vector>
 
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
-// Functions to convert between Qt dates and Celestia dates.
-// TODO: Qt's date class doesn't support leap seconds
-static double QDateToTDB(const QDate& date)
+#include <fmt/format.h>
+
+#include <Qt>
+#include <QAbstractTableModel>
+#include <QAction>
+#include <QApplication>
+#include <QComboBox>
+#include <QDate>
+#include <QDateEdit>
+#include <QDateTime>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLatin1Char>
+#include <QMenu>
+#include <QMessageBox>
+#include <QModelIndex>
+#include <QProgressDialog>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QString>
+#include <QTime>
+#include <QTreeView>
+#include <QVariant>
+#include <QVBoxLayout>
+#include <QWidget>
+
+#include <celastro/date.h>
+#include <celengine/body.h>
+#include <celengine/observer.h>
+#include <celengine/selection.h>
+#include <celengine/simulation.h>
+#include <celengine/univcoord.h>
+#include <celestia/celestiacore.h>
+#include <celmath/geomutil.h>
+#include <celmath/intersect.h>
+#include <celmath/sphere.h>
+#include <celutil/gettext.h>
+
+namespace celestia::qt
 {
-    return astro::UTCtoTDB(astro::Date(date.year(), date.month(), date.day()));
+
+namespace
+{
+
+constexpr std::array planets =
+{
+    N_("Earth"),
+    N_("Jupiter"),
+    N_("Saturn"),
+    N_("Uranus"),
+    N_("Neptune"),
+    N_("Pluto"),
+};
+
+// Find the point of maximum eclipse, either the intersection of the eclipsed body with the
+// ray from sun to occluder, or the nearest point to that ray if there is no intersection.
+// The returned point is relative to the center of the eclipsed body. Note that this function
+// assumes that the eclipsed body is spherical.
+Eigen::Vector3d
+findMaxEclipsePoint(const Eigen::Vector3d& toCasterDir,
+                    const Eigen::Vector3d& toReceiver,
+                    double eclipsedBodyRadius)
+{
+    double distance = 0.0;
+    bool intersect = math::testIntersection(Eigen::ParametrizedLine<double, 3>(Eigen::Vector3d::Zero(), toCasterDir),
+                                            math::Sphered(toReceiver, eclipsedBodyRadius),
+                                            distance);
+
+    Eigen::Vector3d maxEclipsePoint;
+    if (intersect)
+    {
+        maxEclipsePoint = (toCasterDir * distance) - toReceiver;
+    }
+    else
+    {
+        // If the center line doesn't actually intersect the occluder, find the point on the
+        // eclipsed body nearest to the line.
+        double t = toReceiver.dot(toCasterDir) / toCasterDir.squaredNorm();
+        Eigen::Vector3d closestPoint = t * toCasterDir;
+        maxEclipsePoint = closestPoint - toReceiver;
+        maxEclipsePoint *= eclipsedBodyRadius / maxEclipsePoint.norm();
+    }
+
+    return maxEclipsePoint;
 }
 
+} // end unnamed namespace
 
-static QDateTime TDBToQDate(double tdb)
-{
-    astro::Date date = astro::TDBtoUTC(tdb);
-
-    int sec = (int) date.seconds;
-    int msec = (int) ((date.seconds - sec) * 1000);
-
-    return QDateTime(QDate(date.year, date.month, date.day),
-                     QTime(date.hour, date.minute, sec, msec),
-                     Qt::UTC);
-}
-
-
-class EventTableModel : public QAbstractTableModel
+class EventFinder::EventTableModel : public QAbstractTableModel
 {
 public:
     EventTableModel() = default;
@@ -74,7 +123,7 @@ public:
     int columnCount(const QModelIndex& index) const override;
     void sort(int column, Qt::SortOrder order) override;
 
-    void setEclipses(const vector<Eclipse>& _eclipses);
+    void setEclipses(const std::vector<Eclipse>& _eclipses);
 
     const Eclipse* eclipseAtIndex(const QModelIndex& index) const;
 
@@ -87,17 +136,17 @@ public:
     };
 
 private:
-    vector<Eclipse> eclipses;
+    std::vector<Eclipse> eclipses;
 };
 
-
-Qt::ItemFlags EventTableModel::flags(const QModelIndex& /*unused*/) const
+Qt::ItemFlags
+EventFinder::EventTableModel::flags(const QModelIndex& /*unused*/) const
 {
-    return Qt::ItemIsSelectable | Qt::ItemIsEnabled;
+    return static_cast<Qt::ItemFlags>(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
 }
 
-
-QVariant EventTableModel::data(const QModelIndex& index, int role) const
+QVariant
+EventFinder::EventTableModel::data(const QModelIndex& index, int role) const
 {
     if (index.row() < 0 || index.row() >= (int) eclipses.size())
     {
@@ -119,7 +168,7 @@ QVariant EventTableModel::data(const QModelIndex& index, int role) const
     case OcculterColumn:
         return QString(eclipse.occulter->getName(true).c_str());
     case StartTimeColumn:
-        return TDBToQDate(eclipse.startTime).toLocalTime().toString("dd MMM yyyy hh:mm");
+        return TDBToQString(eclipse.startTime);
     case DurationColumn:
     {
         int minutes = (int) ((eclipse.endTime - eclipse.startTime) * 24 * 60);
@@ -130,8 +179,8 @@ QVariant EventTableModel::data(const QModelIndex& index, int role) const
     }
 }
 
-
-QVariant EventTableModel::headerData(int section, Qt::Orientation /*unused*/, int role) const
+QVariant
+EventFinder::EventTableModel::headerData(int section, Qt::Orientation /*unused*/, int role) const
 {
     if (role != Qt::DisplayRole)
         return QVariant();
@@ -139,32 +188,32 @@ QVariant EventTableModel::headerData(int section, Qt::Orientation /*unused*/, in
     switch (section)
     {
     case 0:
-        return _("Eclipsed body");
+        return QString(_("Eclipsed body"));
     case 1:
-        return _("Occulter");
+        return QString(_("Occulter"));
     case 2:
-        return _("Start time");
+        return QString(_("Start time"));
     case 3:
-        return _("Duration");
+        return QString(_("Duration"));
     default:
         return QVariant();
     }
 }
 
-
-int EventTableModel::rowCount(const QModelIndex& /*unused*/) const
+int
+EventFinder::EventTableModel::rowCount(const QModelIndex& /*unused*/) const
 {
     return (int) eclipses.size();
 }
 
-
-int EventTableModel::columnCount(const QModelIndex& /*unused*/) const
+int
+EventFinder::EventTableModel::columnCount(const QModelIndex& /*unused*/) const
 {
     return 4;
 }
 
-
-void EventTableModel::sort(int column, Qt::SortOrder order)
+void
+EventFinder::EventTableModel::sort(int column, Qt::SortOrder order)
 {
     switch (column)
     {
@@ -187,21 +236,21 @@ void EventTableModel::sort(int column, Qt::SortOrder order)
     }
 
     if (order == Qt::DescendingOrder)
-        reverse(eclipses.begin(), eclipses.end());
+        std::reverse(eclipses.begin(), eclipses.end());
 
     dataChanged(index(0, 0), index(eclipses.size() - 1, columnCount(QModelIndex())));
 }
 
-
-void EventTableModel::setEclipses(const vector<Eclipse>& _eclipses)
+void
+EventFinder::EventTableModel::setEclipses(const std::vector<Eclipse>& _eclipses)
 {
     beginResetModel();
     eclipses = _eclipses;
     endResetModel();
 }
 
-
-const Eclipse* EventTableModel::eclipseAtIndex(const QModelIndex& index) const
+const Eclipse*
+EventFinder::EventTableModel::eclipseAtIndex(const QModelIndex& index) const
 {
     int row = index.row();
     if (row >= 0 && row < (int) eclipses.size())
@@ -209,7 +258,6 @@ const Eclipse* EventTableModel::eclipseAtIndex(const QModelIndex& index) const
     else
         return nullptr;
 }
-
 
 EventFinder::EventFinder(CelestiaCore* _appCore,
                          const QString& title,
@@ -268,12 +316,8 @@ EventFinder::EventFinder(CelestiaCore* _appCore,
     layout->addWidget(subgroup);
 
     planetSelect = new QComboBox();
-    planetSelect->addItem(_("Earth"));
-    planetSelect->addItem(_("Jupiter"));
-    planetSelect->addItem(_("Saturn"));
-    planetSelect->addItem(_("Uranus"));
-    planetSelect->addItem(_("Neptune"));
-    planetSelect->addItem(_("Pluto"));
+    for (const char *planet : planets)
+        planetSelect->addItem(_(planet));
     layout->addWidget(planetSelect);
 
     QPushButton* findButton = new QPushButton(_("Find eclipses"));
@@ -296,8 +340,8 @@ EventFinder::EventFinder(CelestiaCore* _appCore,
     this->setWidget(finderWidget);
 }
 
-
-EclipseFinderWatcher::Status EventFinder::eclipseFinderProgressUpdate(double t)
+EclipseFinderWatcher::Status
+EventFinder::eclipseFinderProgressUpdate(double t)
 {
     if (progress != nullptr)
     {
@@ -317,8 +361,8 @@ EclipseFinderWatcher::Status EventFinder::eclipseFinderProgressUpdate(double t)
     return EclipseFinderWatcher::ContinueOperation;
 }
 
-
-void EventFinder::slotFindEclipses()
+void
+EventFinder::slotFindEclipses()
 {
     int eclipseTypeMask = Eclipse::Solar;
     if (lunarOnlyButton->isChecked())
@@ -326,8 +370,8 @@ void EventFinder::slotFindEclipses()
     else if (allEclipsesButton->isChecked())
         eclipseTypeMask = Eclipse::Solar | Eclipse::Lunar;
 
-    QString bodyName = QString("Sol/") + planetSelect->currentText();
-    Selection obj = appCore->getSimulation()->findObjectFromPath(bodyName.toStdString(), true);
+    std::string bodyName = fmt::format("Sol/{}", planets[planetSelect->currentIndex()]);
+    Selection obj = appCore->getSimulation()->findObjectFromPath(bodyName);
 
     if (obj.body() == nullptr)
     {
@@ -362,7 +406,7 @@ void EventFinder::slotFindEclipses()
     progress->show();
 
 
-    vector<Eclipse> eclipses;
+    std::vector<Eclipse> eclipses;
     finder.findEclipses(startTimeTDB, endTimeTDB,
                         eclipseTypeMask,
                         eclipses);
@@ -377,8 +421,8 @@ void EventFinder::slotFindEclipses()
     eventTable->resizeColumnToContents(EventTableModel::StartTimeColumn);
 }
 
-
-void EventFinder::slotContextMenu(const QPoint& pos)
+void
+EventFinder::slotContextMenu(const QPoint& pos)
 {
     QModelIndex index = eventTable->indexAt(pos);
     activeEclipse = model->eclipseAtIndex(index);
@@ -413,49 +457,17 @@ void EventFinder::slotContextMenu(const QPoint& pos)
     }
 }
 
-
-void EventFinder::slotSetEclipseTime()
+void
+EventFinder::slotSetEclipseTime()
 {
     double midEclipseTime = (activeEclipse->startTime + activeEclipse->endTime) / 2.0;
     appCore->getSimulation()->setTime(midEclipseTime);
 }
 
-
-// Find the point of maximum eclipse, either the intersection of the eclipsed body with the
-// ray from sun to occluder, or the nearest point to that ray if there is no intersection.
-// The returned point is relative to the center of the eclipsed body. Note that this function
-// assumes that the eclipsed body is spherical.
-static Vector3d findMaxEclipsePoint(const Vector3d& toCasterDir,
-                                    const Vector3d& toReceiver,
-                                    double eclipsedBodyRadius)
-{
-    double distance = 0.0;
-    bool intersect = testIntersection(Ray3d(Vector3d::Zero(), toCasterDir),
-                                      Sphered(toReceiver, eclipsedBodyRadius),
-                                      distance);
-
-    Vector3d maxEclipsePoint;
-    if (intersect)
-    {
-        maxEclipsePoint = (toCasterDir * distance) - toReceiver;
-    }
-    else
-    {
-        // If the center line doesn't actually intersect the occluder, find the point on the
-        // eclipsed body nearest to the line.
-        double t = toReceiver.dot(toCasterDir) / toCasterDir.squaredNorm();
-        Vector3d closestPoint = t * toCasterDir;
-        maxEclipsePoint = closestPoint - toReceiver;
-        maxEclipsePoint *= eclipsedBodyRadius / maxEclipsePoint.norm();
-    }
-
-    return maxEclipsePoint;
-}
-
-
 /*! Move the camera to a point 3 radii from the surface, aimed at the point of maximum eclipse.
  */
-void EventFinder::slotViewNearEclipsed()
+void
+EventFinder::slotViewNearEclipsed()
 {
     Simulation* sim = appCore->getSimulation();
 
@@ -465,26 +477,26 @@ void EventFinder::slotViewNearEclipsed()
         slotSetEclipseTime();
     now = sim->getTime();
 
-    Selection receiver(activeEclipse->receiver);
-    Selection caster(activeEclipse->occulter);
-    Selection sun(activeEclipse->receiver->getSystem()->getStar());
+    Body* const receiver = activeEclipse->receiver;
+    const Body* const caster = activeEclipse->occulter;
+    const Star* const sun = activeEclipse->receiver->getSystem()->getStar();
 
-    Vector3d toCasterDir = caster.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d toReceiver = receiver.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d maxEclipsePoint = findMaxEclipsePoint(toCasterDir, toReceiver, receiver.radius());
+    Eigen::Vector3d toCasterDir = caster->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d toReceiver = receiver->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d maxEclipsePoint = findMaxEclipsePoint(toCasterDir, toReceiver, receiver->getRadius());
 
-    Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Vector3d::UnitY();
-    Vector3d viewerPos = maxEclipsePoint * 4.0; // 4 radii from center
-    Quaterniond viewOrientation = LookAt(viewerPos, maxEclipsePoint, up);
+    Eigen::Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Eigen::Vector3d::UnitY();
+    Eigen::Vector3d viewerPos = maxEclipsePoint * 4.0; // 4 radii from center
+    Eigen::Quaterniond viewOrientation = math::LookAt(viewerPos, maxEclipsePoint, up);
 
-    sim->setFrame(ObserverFrame::Ecliptical, receiver);
+    sim->setFrame(ObserverFrame::CoordinateSystem::Ecliptical, receiver);
     sim->gotoLocation(UniversalCoord::Zero().offsetKm(viewerPos), viewOrientation, 5.0);
 }
 
-
 /*! Position the camera on the surface of the eclipsed body and pointing directly at the sun.
  */
-void EventFinder::slotViewEclipsedSurface()
+void
+EventFinder::slotViewEclipsedSurface()
 {
     Simulation* sim = appCore->getSimulation();
 
@@ -494,27 +506,27 @@ void EventFinder::slotViewEclipsedSurface()
         slotSetEclipseTime();
     now = sim->getTime();
 
-    Selection receiver(activeEclipse->receiver);
-    Selection caster(activeEclipse->occulter);
-    Selection sun(activeEclipse->receiver->getSystem()->getStar());
+    Body* const receiver = activeEclipse->receiver;
+    const Body* const caster = activeEclipse->occulter;
+    const Star* const sun = activeEclipse->receiver->getSystem()->getStar();
 
-    Vector3d toCasterDir = caster.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d toReceiver = receiver.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d maxEclipsePoint = findMaxEclipsePoint(toCasterDir, toReceiver, receiver.radius());
+    Eigen::Vector3d toCasterDir = caster->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d toReceiver = receiver->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d maxEclipsePoint = findMaxEclipsePoint(toCasterDir, toReceiver, receiver->getRadius());
 
-    Vector3d up = maxEclipsePoint.normalized();
+    Eigen::Vector3d up = maxEclipsePoint.normalized();
     // TODO: Select alternate up direction when eclipse is directly overhead
 
-    Quaterniond viewOrientation = LookAt<double>(maxEclipsePoint, -toReceiver, up);
-    Vector3d v = maxEclipsePoint * 1.0001;
+    Eigen::Quaterniond viewOrientation = math::LookAt<double>(maxEclipsePoint, -toReceiver, up);
+    Eigen::Vector3d v = maxEclipsePoint * 1.0001;
 
-    sim->setFrame(ObserverFrame::Ecliptical, receiver);
+    sim->setFrame(ObserverFrame::CoordinateSystem::Ecliptical, receiver);
     sim->gotoLocation(UniversalCoord::Zero().offsetKm(v), viewOrientation, 5.0);
 }
 
-
 /*! Position the camera on the surface of the occluding body, aimed toward the eclipse. */
-void EventFinder::slotViewOccluderSurface()
+void
+EventFinder::slotViewOccluderSurface()
 {
     Simulation* sim = appCore->getSimulation();
 
@@ -524,26 +536,26 @@ void EventFinder::slotViewOccluderSurface()
         slotSetEclipseTime();
     now = sim->getTime();
 
-    Selection receiver(activeEclipse->receiver);
-    Selection caster(activeEclipse->occulter);
-    Selection sun(activeEclipse->receiver->getSystem()->getStar());
+    const Body* const receiver = activeEclipse->receiver;
+    Body* const caster = activeEclipse->occulter;
+    const Star* const sun = activeEclipse->receiver->getSystem()->getStar();
 
-    Vector3d toCasterDir = caster.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Vector3d::UnitY();
-    Vector3d toReceiverDir = receiver.getPosition(now).offsetFromKm(sun.getPosition(now));
+    Eigen::Vector3d toCasterDir = caster->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Eigen::Vector3d::UnitY();
+    Eigen::Vector3d toReceiverDir = receiver->getPosition(now).offsetFromKm(sun->getPosition(now));
 
-    Vector3d surfacePoint = toCasterDir * caster.radius() / toCasterDir.norm() * 1.0001;
-    Quaterniond viewOrientation = LookAt<double>(surfacePoint, toReceiverDir, up);
+    Eigen::Vector3d surfacePoint = toCasterDir * caster->getRadius() / toCasterDir.norm() * 1.0001;
+    Eigen::Quaterniond viewOrientation = math::LookAt<double>(surfacePoint, toReceiverDir, up);
 
-    sim->setFrame(ObserverFrame::Ecliptical, caster);
+    sim->setFrame(ObserverFrame::CoordinateSystem::Ecliptical, caster);
     sim->gotoLocation(UniversalCoord::Zero().offsetKm(surfacePoint), viewOrientation, 5.0);
 }
-
 
 /*! Position the camera directly behind the occluding body in the direction
  *  of the sun.
  */
-void EventFinder::slotViewBehindOccluder()
+void
+EventFinder::slotViewBehindOccluder()
 {
     Simulation* sim = appCore->getSimulation();
 
@@ -553,17 +565,19 @@ void EventFinder::slotViewBehindOccluder()
         slotSetEclipseTime();
     now = sim->getTime();
 
-    Selection receiver(activeEclipse->receiver);
-    Selection caster(activeEclipse->occulter);
-    Selection sun(activeEclipse->receiver->getSystem()->getStar());
+    const Body* const receiver = activeEclipse->receiver;
+    Body* const caster = activeEclipse->occulter;
+    const Star* const sun = activeEclipse->receiver->getSystem()->getStar();
 
-    Vector3d toCasterDir = caster.getPosition(now).offsetFromKm(sun.getPosition(now));
-    Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Vector3d::UnitY();
-    Vector3d toReceiverDir = receiver.getPosition(now).offsetFromKm(sun.getPosition(now));
+    Eigen::Vector3d toCasterDir = caster->getPosition(now).offsetFromKm(sun->getPosition(now));
+    Eigen::Vector3d up = activeEclipse->receiver->getEclipticToBodyFixed(now).conjugate() * Eigen::Vector3d::UnitY();
+    Eigen::Vector3d toReceiverDir = receiver->getPosition(now).offsetFromKm(sun->getPosition(now));
 
-    Vector3d surfacePoint = toCasterDir * caster.radius() / toCasterDir.norm() * 20.0;
-    Quaterniond viewOrientation = LookAt<double>(surfacePoint, toReceiverDir, up);
+    Eigen::Vector3d surfacePoint = toCasterDir * caster->getRadius() / toCasterDir.norm() * 20.0;
+    Eigen::Quaterniond viewOrientation = math::LookAt<double>(surfacePoint, toReceiverDir, up);
 
-    sim->setFrame(ObserverFrame::Ecliptical, caster);
+    sim->setFrame(ObserverFrame::CoordinateSystem::Ecliptical, caster);
     sim->gotoLocation(UniversalCoord::Zero().offsetKm(surfacePoint), viewOrientation, 5.0);
 }
+
+} // end namespace celestia::qt

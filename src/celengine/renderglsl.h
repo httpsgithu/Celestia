@@ -10,25 +10,39 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_RENDERGLSL_H_
-#define _CELENGINE_RENDERGLSL_H_
+#pragma once
 
-#include <celengine/lightenv.h>
+#include <cstdint>
+
+#include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include <celutil/reshandle.h>
+
+class Atmosphere;
+class Geometry;
+class LightingState;
+struct Matrices;
 class Renderer;
+struct RenderInfo;
+class Texture;
+
+namespace celestia::math
+{
+class Frustum;
+}
 
 void renderEllipsoid_GLSL(const RenderInfo& ri,
-                       const LightingState& ls,
-                       Atmosphere* atmosphere,
-                       float cloudTexOffset,
-                       const Eigen::Vector3f& semiAxes,
-                       unsigned int textureRes,
-                       uint64_t renderFlags,
-                       const Eigen::Quaternionf& planetOrientation,
-                       const celmath::Frustum& frustum,
-                       const Matrices &m,
-                       Renderer* renderer);
+                          const LightingState& ls,
+                          Atmosphere* atmosphere,
+                          float cloudTexOffset,
+                          const Eigen::Vector3f& semiAxes,
+                          unsigned int textureRes,
+                          std::uint64_t renderFlags,
+                          const Eigen::Quaternionf& planetOrientation,
+                          const celestia::math::Frustum& frustum,
+                          const Matrices &m,
+                          Renderer* renderer);
 
 void renderGeometry_GLSL(Geometry* geometry,
                          const RenderInfo& ri,
@@ -36,7 +50,7 @@ void renderGeometry_GLSL(Geometry* geometry,
                          const LightingState& ls,
                          const Atmosphere* atmosphere,
                          float geometryScale,
-                         uint64_t renderFlags,
+                         std::uint64_t renderFlags,
                          const Eigen::Quaternionf& planetOrientation,
                          double tsec,
                          const Matrices &m,
@@ -50,40 +64,18 @@ void renderClouds_GLSL(const RenderInfo& ri,
                        float texOffset,
                        const Eigen::Vector3f& semiAxes,
                        unsigned int textureRes,
-                       uint64_t renderFlags,
+                       std::uint64_t renderFlags,
                        const Eigen::Quaternionf& planetOrientation,
-                       const celmath::Frustum& frustum,
+                       const celestia::math::Frustum& frustum,
                        const Matrices &m,
                        Renderer* renderer);
-
-void renderAtmosphere_GLSL(const RenderInfo& ri,
-                           const LightingState& ls,
-                           Atmosphere* atmosphere,
-                           float radius,
-                           const Eigen::Quaternionf& planetOrientation,
-                           const celmath::Frustum& frustum,
-                           const Matrices &m,
-                           Renderer* renderer);
-
-void renderRings_GLSL(RingSystem& rings,
-                      RenderInfo& ri,
-                      const LightingState& ls,
-                      float planetRadius,
-                      float planetOblateness,
-                      unsigned int textureResolution,
-                      bool renderShadow,
-                      float segmentSizeInPixels,
-                      const Matrices &m,
-                      Renderer* renderer);
 
 void renderGeometry_GLSL_Unlit(Geometry* geometry,
                                const RenderInfo& ri,
                                ResourceHandle texOverride,
                                float geometryScale,
-                               uint64_t renderFlags,
+                               std::uint64_t renderFlags,
                                const Eigen::Quaternionf& planetOrientation,
                                double tsec,
                                const Matrices &m,
                                Renderer* renderer);
-
-#endif // _CELENGINE_RENDERGLSL_H_

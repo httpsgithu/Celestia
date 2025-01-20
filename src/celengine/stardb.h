@@ -1,6 +1,6 @@
 // stardb.h
 //
-// Copyright (C) 2001-2009, the Celestia Development Team
+// Copyright (C) 2001-2024, the Celestia Development Team
 // Original version by Chris Laurel <claurel@gmail.com>
 //
 // This program is free software; you can redistribute it and/or
@@ -8,140 +8,95 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_STARDB_H_
-#define _CELENGINE_STARDB_H_
+#pragma once
 
-#include <iostream>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
-#include <map>
-#include <celutil/blockarray.h>
-#include <celengine/constellation.h>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+#include <celengine/astroobj.h>
+#include <celengine/completion.h>
 #include <celengine/starname.h>
-#include <celengine/star.h>
 #include <celengine/staroctree.h>
-#include <celengine/parseobject.h>
 
-
-static const unsigned int MAX_STAR_NAMES = 10;
-
+class Star;
+class StarDatabaseBuilder;
 
 class StarDatabase
 {
- public:
-    StarDatabase();
-    ~StarDatabase();
-
-
-    inline Star*  getStar(const uint32_t) const;
-    inline uint32_t size() const;
-
-    Star* find(AstroCatalog::IndexNumber catalogNumber) const;
-    Star* find(const std::string&, bool i18n) const;
-    AstroCatalog::IndexNumber findCatalogNumberByName(const std::string&, bool i18n) const;
-
-    std::vector<std::string> getCompletion(const std::string&, bool i18n) const;
-
-    void findVisibleStars(StarHandler& starHandler,
-                          const Eigen::Vector3f& obsPosition,
-                          const Eigen::Quaternionf&   obsOrientation,
-                          float fovY,
-                          float aspectRatio,
-                          float limitingMag,
-                          OctreeProcStats * = nullptr) const;
-
-    void findCloseStars(StarHandler& starHandler,
-                        const Eigen::Vector3f& obsPosition,
-                        float radius) const;
-
-    std::string getStarName    (const Star&, bool i18n = false) const;
-    void getStarName(const Star& star, char* nameBuffer, unsigned int bufferSize, bool i18n = false) const;
-    std::string getStarNameList(const Star&, const unsigned int maxNames = MAX_STAR_NAMES) const;
-
-    StarNameDatabase* getNameDatabase() const;
-    void setNameDatabase(StarNameDatabase*);
-
-    bool load(std::istream&, const fs::path& resourcePath = fs::path());
-    bool loadBinary(std::istream&);
-
-    enum Catalog
-    {
-        HenryDraper = 0,
-        Gliese      = 1,
-        SAO         = 2,
-        MaxCatalog  = 3,
-    };
+public:
+    // The size of the root star octree node is also the maximum distance
+    // distance from the Sun at which any star may be located. The current
+    // setting of 1.0e7 light years is large enough to contain the entire
+    // local group of galaxies. A larger value should be OK, but the
+    // performance implications for octree traversal still need to be
+    // investigated.
+    static constexpr float STAR_OCTREE_ROOT_SIZE = 1000000000.0f;
 
     // Not exact, but any star with a catalog number greater than this is assumed to not be
     // a HIPPARCOS stars.
-    static const AstroCatalog::IndexNumber MAX_HIPPARCOS_NUMBER = 999999;
+    static constexpr AstroCatalog::IndexNumber MAX_HIPPARCOS_NUMBER = 999999;
 
-    struct CrossIndexEntry
-    {
-        AstroCatalog::IndexNumber catalogNumber;
-        AstroCatalog::IndexNumber celCatalogNumber;
+    static constexpr unsigned int MAX_STAR_NAMES = 10;
 
-        bool operator<(const CrossIndexEntry&) const;
-    };
+    StarDatabase() = default;
+    ~StarDatabase();
 
-    typedef std::vector<CrossIndexEntry> CrossIndex;
+    const celestia::engine::StarOctree* getOctree() const;
 
-    bool   loadCrossIndex  (const Catalog, std::istream&);
-    AstroCatalog::IndexNumber searchCrossIndexForCatalogNumber(const Catalog, const AstroCatalog::IndexNumber number) const;
-    Star*  searchCrossIndex(const Catalog, const AstroCatalog::IndexNumber number) const;
-    AstroCatalog::IndexNumber crossIndex(const Catalog, const AstroCatalog::IndexNumber number) const;
+    inline Star* getStar(const std::uint32_t) const;
+    inline std::uint32_t size() const;
 
-    void finish();
+    Star* find(AstroCatalog::IndexNumber catalogNumber) const;
+    Star* find(std::string_view, bool i18n) const;
 
-    static StarDatabase* read(std::istream&);
+    void getCompletion(std::vector<celestia::engine::Completion>&, std::string_view) const;
+
+    void findVisibleStars(celestia::engine::StarHandler& starHandler,
+                          const Eigen::Vector3f& obsPosition,
+                          const Eigen::Quaternionf& obsOrientation,
+                          float fovY,
+                          float aspectRatio,
+                          float limitingMag) const;
+
+    void findCloseStars(celestia::engine::StarHandler& starHandler,
+                        const Eigen::Vector3f& obsPosition,
+                        float radius) const;
+
+    std::string getStarName(const Star&, bool i18n = false) const;
+    std::string getStarNameList(const Star&, unsigned int maxNames = MAX_STAR_NAMES) const;
+
+    const StarNameDatabase* getNameDatabase() const;
 
 private:
-    bool createStar(Star* star,
-                    DataDisposition disposition,
-                    AstroCatalog::IndexNumber catalogNumber,
-                    Hash* starData,
-                    const fs::path& path,
-                    const bool isBarycenter);
+    Star* searchCrossIndex(StarCatalog, AstroCatalog::IndexNumber number) const;
 
-    void buildOctree();
-    void buildIndexes();
-    Star* findWhileLoading(AstroCatalog::IndexNumber catalogNumber) const;
+    std::unique_ptr<StarNameDatabase>             namesDB;
+    std::vector<std::uint32_t>                    catalogNumberIndex;
+    std::unique_ptr<celestia::engine::StarOctree> octreeRoot;
 
-    int nStars{ 0 };
-
-    Star*             stars{ nullptr };
-    StarNameDatabase* namesDB{ nullptr };
-    Star**            catalogNumberIndex{ nullptr };
-    StarOctree*       octreeRoot{ nullptr };
-    AstroCatalog::IndexNumber nextAutoCatalogNumber{ 0xfffffffe };
-
-    std::vector<CrossIndex*> crossIndexes;
-
-    // These values are used by the star database loader; they are
-    // not used after loading is complete.
-    BlockArray<Star> unsortedStars;
-    // List of stars loaded from binary file, sorted by catalog number
-    Star** binFileCatalogNumberIndex{ nullptr };
-    unsigned int binFileStarCount{ 0 };
-    // Catalog number -> star mapping for stars loaded from stc files
-    std::map<AstroCatalog::IndexNumber, Star*> stcFileCatalogNumberIndex;
-
-    struct BarycenterUsage
-    {
-        AstroCatalog::IndexNumber catNo;
-        AstroCatalog::IndexNumber barycenterCatNo;
-    };
-    std::vector<BarycenterUsage> barycenters;
+    friend class StarDatabaseBuilder;
 };
 
-
-Star* StarDatabase::getStar(const uint32_t n) const
+inline const celestia::engine::StarOctree*
+StarDatabase::getOctree() const
 {
-    return stars + n;
+    return octreeRoot.get();
 }
 
-uint32_t StarDatabase::size() const
+inline Star*
+StarDatabase::getStar(const std::uint32_t n) const
 {
-    return nStars;
+    return &(*octreeRoot)[n];
 }
 
-#endif // _CELENGINE_STARDB_H_
+inline std::uint32_t
+StarDatabase::size() const
+{
+    return octreeRoot->size();
+}

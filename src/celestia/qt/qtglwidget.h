@@ -11,60 +11,66 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef QTGLWIDGET_H
-#define QTGLWIDGET_H
+#pragma once
 
-#include <QGLWidget>
+#include <memory>
 
-#include "celestia/celestiacore.h"
-#include "celengine/simulation.h"
-#include <celengine/starbrowser.h>
-#include <string>
-#include <vector>
+#include <celengine/glsupport.h>
+
+#include <QOpenGLWidget>
+
+#include <celestia/celestiacore.h>
+
+class QKeyEvent;
+class QMouseEvent;
+class QWheelEvent;
+class QWidget;
+
+class Renderer;
+
+namespace celestia::qt
+{
+
+class DragHandler;
 
 /**
   *@author Christophe Teyssier
   */
 
-class CelestiaGlWidget : public QGLWidget, public CelestiaCore::CursorHandler
+class CelestiaGlWidget : public QOpenGLWidget, public CelestiaCore::CursorHandler
 {
     Q_OBJECT
 
 public:
     CelestiaGlWidget(QWidget* parent, const char* name, CelestiaCore* core);
-    ~CelestiaGlWidget() = default;
+    ~CelestiaGlWidget() override;
 
-    void setCursorShape(CelestiaCore::CursorShape);
-    CelestiaCore::CursorShape getCursorShape() const;
+    void setCursorShape(CelestiaCore::CursorShape) override;
+    CelestiaCore::CursorShape getCursorShape() const override;
 
 protected:
-    void initializeGL();
-    void paintGL();
-    void resizeGL( int w, int h );
-    virtual void mouseMoveEvent(QMouseEvent* m );
-    virtual void mousePressEvent(QMouseEvent* m );
-    virtual void mouseReleaseEvent(QMouseEvent* m );
-    virtual void wheelEvent(QWheelEvent* w );
-    virtual void keyPressEvent(QKeyEvent* e );
-    virtual void keyReleaseEvent(QKeyEvent* e );
-    bool handleSpecialKey(QKeyEvent* e, bool down);
+    void initializeGL() override;
+    void paintGL() override;
+    void resizeGL(int w, int h) override;
+    void mouseMoveEvent(QMouseEvent* m) override;
+    void mousePressEvent(QMouseEvent* m) override;
+    void mouseReleaseEvent(QMouseEvent* m) override;
+    void wheelEvent(QWheelEvent* w) override;
+    void keyPressEvent(QKeyEvent* e) override;
+    void keyReleaseEvent(QKeyEvent* e ) override;
 
-    virtual QSize sizeHint() const;
+    QSize sizeHint() const override;
 
 private:
+    bool handleSpecialKey(QKeyEvent* e, bool down);
 
     CelestiaCore* appCore;
     Renderer* appRenderer;
-    Simulation* appSim;
     int lastX{ 0 };
     int lastY{ 0 };
     bool cursorVisible;
-    QPoint saveGlobalCursorPos;
-    QPoint saveLocalCursorPos;
+    std::unique_ptr<DragHandler> dragHandler;
     CelestiaCore::CursorShape currentCursor;
-
-    //KActionCollection* actionColl;
-
 };
 
-#endif
+} // end namespace celestia::qt

@@ -10,27 +10,41 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <celestia/celestiacore.h>
-#include <celengine/astro.h>
-#include <celutil/gettext.h>
-#include <QPushButton>
-#include <QDialogButtonBox>
-#include <QSpinBox>
-#include <QDoubleSpinBox>
-#include <QComboBox>
-#include <QLabel>
-#include <QVBoxLayout>
-#include <QGroupBox>
-#include <QGridLayout>
 #include "qtsettimedialog.h"
 
-#ifdef _WIN32
-static const double minLocalTime = 2440587.5; // 1970 Jan 1 00:00:00
-#else
-static const double minLocalTime = 2415733.0; // 1901 Dec 14 12:00:00
-#endif
-static const double maxLocalTime = 2465442.0; // 2038 Jan 18 12:00:00
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QGridLayout>
+#include <QLabel>
+#include <QSpinBox>
+#include <QVBoxLayout>
 
+#include <celastro/date.h>
+#include <celestia/celestiacore.h>
+#include <celutil/gettext.h>
+
+namespace celestia::qt
+{
+
+namespace
+{
+#ifdef _WIN32
+constexpr double minLocalTime = 2440587.5; // 1970 Jan 1 00:00:00
+#else
+constexpr double minLocalTime = 2415733.0; // 1901 Dec 14 12:00:00
+#endif
+constexpr double maxLocalTime = 2465442.0; // 2038 Jan 18 12:00:00
+
+template<typename TControl, typename TValue>
+void setValueNoSignal(TControl* target, TValue value)
+{
+    target->blockSignals(true);
+    target->setValue(value);
+    target->blockSignals(false);
+}
+
+} // end unnamed namespace
 
 SetTimeDialog::SetTimeDialog(double currentTimeTDB,
                              QWidget* parent,
@@ -130,7 +144,7 @@ SetTimeDialog::SetTimeDialog(double currentTimeTDB,
     timeLayout->addWidget(julianDateLabel, 3, 0);
 
     julianDateSpin = new QDoubleSpinBox(this);
-    julianDateSpin->setDecimals(10);
+    julianDateSpin->setDecimals(6);
     julianDateSpin->setMinimum(-1931442.5); // -10000 Jan 01 00:00:00
     julianDateSpin->setMaximum(5373850.5); // 10000 Dec 31 23:59:59
     julianDateSpin->setAccelerated(true);
@@ -147,10 +161,6 @@ SetTimeDialog::SetTimeDialog(double currentTimeTDB,
     QDialogButtonBox* buttonBox = new QDialogButtonBox(this);
     buttonBox->setStandardButtons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
 
-    QPushButton* setTimeButton = new QPushButton(_("Set time"), buttonBox);
-    buttonBox->addButton(setTimeButton, QDialogButtonBox::ApplyRole);
-    connect(setTimeButton, SIGNAL(clicked()), this, SLOT(slotSetSimulationTime()));
-
     connect(buttonBox, SIGNAL(accepted()), this, SLOT(accept()));
     connect(buttonBox, SIGNAL(rejected()), this, SLOT(reject()));
 
@@ -159,15 +169,16 @@ SetTimeDialog::SetTimeDialog(double currentTimeTDB,
     setLayout(layout);
 }
 
-
-void SetTimeDialog::slotSetSimulationTime()
+void
+SetTimeDialog::slotSetSimulationTime()
 {
     double tdb = astro::TTtoTDB(astro::TAItoTT(astro::JDUTCtoTAI(julianDateSpin->value())));
 
     appCore->getSimulation()->setTime(tdb);
 }
 
-void SetTimeDialog::slotSetDateTime()
+void
+SetTimeDialog::slotSetDateTime()
 {
     double tdb = astro::TTtoTDB(astro::TAItoTT(astro::JDUTCtoTAI(julianDateSpin->value())));
     int tzb = appCore->getTimeZoneBias();
@@ -176,16 +187,17 @@ void SetTimeDialog::slotSetDateTime()
 
     astro::Date date = astro::TDBtoUTC(tdb);
 
-    yearSpin->setValue(date.year);
-    monthSpin->setValue(date.month);
-    daySpin->setValue(date.day);
+    setValueNoSignal(yearSpin, date.year);
+    setValueNoSignal(monthSpin, date.month);
+    setValueNoSignal(daySpin, date.day);
 
-    hourSpin->setValue(date.hour);
-    minSpin->setValue(date.minute);
-    secSpin->setValue((int)date.seconds);
+    setValueNoSignal(hourSpin, date.hour);
+    setValueNoSignal(minSpin, date.minute);
+    setValueNoSignal(secSpin, static_cast<int>(date.seconds));
 }
 
-void SetTimeDialog::slotDateTimeChanged()
+void
+SetTimeDialog::slotDateTimeChanged()
 {
     int year = yearSpin->value();
     int month = monthSpin->value();
@@ -205,7 +217,7 @@ void SetTimeDialog::slotDateTimeChanged()
 
     tdb -= tzb / 86400.0;
     double jdUTC = astro::TAItoJDUTC(astro::TTtoTAI(astro::TDBtoTT(tdb)));
-    julianDateSpin->setValue(jdUTC);
+    setValueNoSignal(julianDateSpin, jdUTC);
 
     if (jdUTC <= minLocalTime || jdUTC >= maxLocalTime)
     {
@@ -220,7 +232,8 @@ void SetTimeDialog::slotDateTimeChanged()
             timeZoneBox->setEnabled(true);
 }
 
-void SetTimeDialog::slotTimeZoneChanged()
+void
+SetTimeDialog::slotTimeZoneChanged()
 {
     int tzb = 0;
 
@@ -248,10 +261,12 @@ void SetTimeDialog::slotTimeZoneChanged()
     slotSetDateTime();
 }
 
-
-void SetTimeDialog::accept()
+void
+SetTimeDialog::accept()
 {
     slotSetSimulationTime();
 
     QDialog::accept();
 }
+
+} // end namespace celestia::qt

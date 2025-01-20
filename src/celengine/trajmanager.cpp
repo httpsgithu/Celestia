@@ -7,97 +7,45 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <config.h>
 #include "trajmanager.h"
+
+#include <utility>
+
 #include <celephem/samporbit.h>
-#include <celutil/debug.h>
-#include <celutil/filetype.h>
-#include <iostream>
-#include <fstream>
-#include <cassert>
-#include <celutil/debug.h>
 
-using namespace std;
-
-
-static TrajectoryManager* trajectoryManager = nullptr;
-
-constexpr const fs::path::value_type UniqueSuffixChar = '!';
-
-
-TrajectoryManager* GetTrajectoryManager()
+namespace celestia::engine
 {
-    if (trajectoryManager == nullptr)
-        trajectoryManager = new TrajectoryManager("data");
-    return trajectoryManager;
-}
 
-
-fs::path TrajectoryInfo::resolve(const fs::path& baseDir)
+std::shared_ptr<const ephem::Orbit>
+TrajectoryManager::find(const fs::path& source,
+                        const fs::path& path,
+                        ephem::TrajectoryInterpolation interpolation,
+                        ephem::TrajectoryPrecision precision)
 {
-    // Ensure that trajectories with different interpolation or precision get resolved to different objects by
-    // adding a 'uniquifying' suffix to the filename that encodes the properties other than filename which can
-    // distinguish two trajectories. This suffix is stripped before the file is actually loaded.
-    fs::path::string_type uniquifyingSuffix, format;
-#ifdef _WIN32
-    format = L"%c%u%u";
-#else
-    format = "%c%u%u";
-#endif
-    uniquifyingSuffix = fmt::sprintf(format, UniqueSuffixChar, (unsigned int) interpolation, (unsigned int) precision);
+    auto filename = path.empty()
+        ? "data" / source
+        : path / "data" / source;
 
-    if (!path.empty())
+    auto it = orbits.try_emplace(Key { std::move(filename), interpolation, precision }).first;
+    if (auto cachedOrbit = it->second.lock(); cachedOrbit != nullptr)
+        return cachedOrbit;
+
+    auto orbit = ephem::LoadSampledTrajectory(it->first.path, interpolation, precision);
+    if (orbit == nullptr)
     {
-        fs::path filename = path / "data" / source;
-        ifstream in(filename.string());
-        if (in.good())
-            return filename += uniquifyingSuffix;
+        orbits.erase(it);
+        return nullptr;
     }
 
-    return (baseDir / source) += uniquifyingSuffix;
+    it->second = orbit;
+    return orbit;
 }
 
-Orbit* TrajectoryInfo::load(const fs::path& filename)
+TrajectoryManager*
+GetTrajectoryManager()
 {
-    // strip off the uniquifying suffix
-    string::size_type uniquifyingSuffixStart = filename.string().rfind(UniqueSuffixChar);
-    fs::path strippedFilename = filename.string().substr(0, uniquifyingSuffixStart);
-    ContentType filetype = DetermineFileType(strippedFilename);
-
-    DPRINTF(LOG_LEVEL_INFO, "Loading trajectory: %s\n", strippedFilename);
-
-    Orbit* sampTrajectory = nullptr;
-
-    if (filetype == Content_CelestiaXYZVTrajectory)
-    {
-        switch (precision)
-        {
-        case TrajectoryPrecisionSingle:
-            sampTrajectory = LoadXYZVTrajectorySinglePrec(strippedFilename, interpolation);
-            break;
-        case TrajectoryPrecisionDouble:
-            sampTrajectory = LoadXYZVTrajectoryDoublePrec(strippedFilename, interpolation);
-            break;
-        default:
-            assert(0);
-            break;
-        }
-    }
-    else
-    {
-        switch (precision)
-        {
-        case TrajectoryPrecisionSingle:
-            sampTrajectory = LoadSampledTrajectorySinglePrec(strippedFilename, interpolation);
-            break;
-        case TrajectoryPrecisionDouble:
-            sampTrajectory = LoadSampledTrajectoryDoublePrec(strippedFilename, interpolation);
-            break;
-        default:
-            assert(0);
-            break;
-        }
-    }
-
-    return sampTrajectory;
+    static TrajectoryManager* const manager = std::make_unique<TrajectoryManager>().release(); //NOSONAR
+    return manager;
 }
+
+} // end namespace celestia::engine

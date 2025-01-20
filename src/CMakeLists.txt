@@ -1,5 +1,6 @@
 set(CELESTIA_LIBS
   cel3ds
+  celastro
   celcompat
   celengine
   celephem
@@ -7,6 +8,7 @@ set(CELESTIA_LIBS
   celimage
   celmath
   celmodel
+  celrender
   celttf
   celutil
 )

@@ -7,46 +7,47 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_DEEPSKYOBJ_H_
-#define _CELENGINE_DEEPSKYOBJ_H_
+#pragma once
 
-#include <vector>
+#include <cstdint>
+#include <iosfwd>
 #include <string>
-#include <iostream>
-#include <celmath/ray.h>
-#include <celengine/astroobj.h>
-#ifdef USE_GLCONTEXT
-#include <celengine/glcontext.h>
-#endif
-#include <celengine/parser.h>
-#include <celcompat/filesystem.h>
+#include <vector>
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include <celcompat/filesystem.h>
+#include <celengine/astroobj.h>
+
+class AssociativeArray;
 class Selection;
 class Renderer;
 struct Matrices;
 
-constexpr const float DSO_DEFAULT_ABS_MAGNITUDE = -1000.0f;
+constexpr inline float DSO_DEFAULT_ABS_MAGNITUDE = -1000.0f;
 
 class Nebula;
 class Galaxy;
 class Globular;
 class OpenCluster;
 
-class DeepSkyObject : public AstroObject
+enum class DeepSkyObjectType
 {
- public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    Galaxy,
+    Globular,
+    Nebula,
+    OpenCluster,
+};
 
-    virtual Selection toSelection();
+class DeepSkyObject
+{
+public:
     DeepSkyObject() = default;
     virtual ~DeepSkyObject() = default;
 
     Eigen::Vector3d getPosition() const;
     void setPosition(const Eigen::Vector3d&);
-
-    static void hsv2rgb( float*, float*, float*, float, float, float);
 
     virtual const char* getType() const = 0;
     virtual void setType(const std::string&) = 0;
@@ -73,44 +74,34 @@ class DeepSkyObject : public AstroObject
     void setAbsoluteMagnitude(float);
 
     const std::string& getInfoURL() const;
-    void setInfoURL(const std::string&);
+    void setInfoURL(std::string&&);
 
     bool isVisible() const { return visible; }
     void setVisible(bool _visible) { visible = _visible; }
     bool isClickable() const { return clickable; }
     void setClickable(bool _clickable) { clickable = _clickable; }
 
+    virtual DeepSkyObjectType getObjType() const = 0;
 
-    virtual const char* getObjTypeName() const = 0;
-
-    virtual bool pick(const celmath::Ray3d& ray,
+    virtual bool pick(const Eigen::ParametrizedLine<double, 3>& ray,
                       double& distanceToPicker,
-                      double& cosAngleToBoundCenter) const = 0;
-    virtual bool load(AssociativeArray*, const fs::path& resPath);
-    virtual void render(const Eigen::Vector3f& offset,
-                        const Eigen::Quaternionf& viewerOrientation,
-                        float brightness,
-                        float pixelSize,
-                        const Matrices& m,
-                        Renderer*) = 0;
+                      double& cosAngleToBoundCenter) const;
+    virtual bool load(const AssociativeArray*, const fs::path& resPath);
 
-    virtual uint64_t getRenderMask() const { return 0; }
+    virtual std::uint64_t getRenderMask() const { return 0; }
     virtual unsigned int getLabelMask() const { return 0; }
 
- private:
+    AstroCatalog::IndexNumber getIndex() const { return indexNumber; }
+    void setIndex(AstroCatalog::IndexNumber idx) { indexNumber = idx; }
+
+private:
     Eigen::Vector3d position{ Eigen::Vector3d::Zero() };
     Eigen::Quaternionf orientation{ Eigen::Quaternionf::Identity() };
     float        radius{ 1 };
     float        absMag{ DSO_DEFAULT_ABS_MAGNITUDE } ;
+    AstroCatalog::IndexNumber indexNumber{ AstroCatalog::InvalidIndex };
     std::string infoURL;
 
     bool visible { true };
     bool clickable { true };
 };
-
-typedef std::vector<DeepSkyObject*> DeepSkyCatalog;
-int LoadDeepSkyObjects(DeepSkyCatalog&, std::istream& in,
-                       const std::string& path);
-
-
-#endif // _CELENGINE_DEEPSKYOBJ_H_

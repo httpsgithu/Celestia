@@ -11,23 +11,29 @@
 // of the License, or (at your option) any later version.
 
 #include "spicerotation.h"
-#include "spiceinterface.h"
-#include <celengine/astro.h>
-#include <celmath/geomutil.h>
-#include <celmath/mathlib.h>
-#include "SpiceUsr.h"
-#include <iostream>
-#include <cstdio>
+
 #include <limits>
 
-using namespace Eigen;
-using namespace std;
-using namespace celmath;
+#include <SpiceUsr.h>
+
+#include <celastro/date.h>
+#include <celcompat/numbers.h>
+#include <celmath/geomutil.h>
+#include <celutil/logger.h>
+#include "spiceinterface.h"
+
+using celestia::util::GetLogger;
 
 
-static const double MILLISEC = astro::secsToDays(0.001);
-static const Quaterniond Rx90 = XRotation(PI / 2.0);
-static const Quaterniond Ry180 = YRotation(PI);
+namespace celestia::ephem
+{
+
+namespace
+{
+
+constexpr double MILLISEC = astro::secsToDays(0.001);
+
+} // end unnamed namespace
 
 /*! Create a new rotation model based on a SPICE frame. The
  *  orientation of the rotation model is the orientation of the
@@ -47,8 +53,7 @@ SpiceRotation::SpiceRotation(const std::string& frameName,
     m_period(period),
     m_spiceErr(false),
     m_validIntervalBegin(beginning),
-    m_validIntervalEnd(ending),
-    m_useDefaultTimeInterval(false)
+    m_validIntervalEnd(ending)
 {
 }
 
@@ -68,9 +73,8 @@ SpiceRotation::SpiceRotation(const std::string& frameName,
     m_baseFrameName(baseFrameName),
     m_period(period),
     m_spiceErr(false),
-    m_validIntervalBegin(-numeric_limits<double>::infinity()),
-    m_validIntervalEnd(numeric_limits<double>::infinity()),
-    m_useDefaultTimeInterval(true)
+    m_validIntervalBegin(-std::numeric_limits<double>::infinity()),
+    m_validIntervalEnd(std::numeric_limits<double>::infinity())
 {
 }
 
@@ -93,23 +97,21 @@ SpiceRotation::getPeriod() const
 
 
 bool
-SpiceRotation::init(const fs::path& path,
-                    const list<string>* requiredKernels)
+SpiceRotation::loadRequiredKernel(const fs::path& path,
+                                  const std::string& kernel)
 {
-    // Load required kernel files
-    if (requiredKernels != nullptr)
-    {
-        for (const auto& kernel : *requiredKernels)
-        {
-            fs::path filepath = path / "data" / kernel;
-            if (!LoadSpiceKernel(filepath))
-            {
-                m_spiceErr = true;
-                break;
-            }
-        }
-    }
+    fs::path filepath = path / "data" / kernel;
+    if (LoadSpiceKernel(filepath))
+        return true;
 
+    m_spiceErr = true;
+    return false;
+}
+
+
+bool
+SpiceRotation::init()
+{
     // Reduce valid interval by a millisecond at each end.
     m_validIntervalBegin += MILLISEC;
     m_validIntervalEnd -= MILLISEC;
@@ -124,7 +126,7 @@ SpiceRotation::init(const fs::path& path,
         // Print the error message
         char errMsg[1024];
         getmsg_c("long", sizeof(errMsg), errMsg);
-        clog << errMsg << "\n";
+        GetLogger()->error("{}\n", errMsg);
         m_spiceErr = true;
 
         reset_c();
@@ -134,7 +136,7 @@ SpiceRotation::init(const fs::path& path,
 }
 
 
-Quaterniond
+Eigen::Quaterniond
 SpiceRotation::computeSpin(double jd) const
 {
     if (jd < m_validIntervalBegin)
@@ -144,7 +146,7 @@ SpiceRotation::computeSpin(double jd) const
 
     if (m_spiceErr)
     {
-        return Quaterniond::Identity();
+        return Eigen::Quaterniond::Identity();
     }
     else
     {
@@ -159,7 +161,7 @@ SpiceRotation::computeSpin(double jd) const
             // Print the error message
             char errMsg[1024];
             getmsg_c("long", sizeof(errMsg), errMsg);
-            clog << errMsg << "\n";
+            GetLogger()->error("{}\n", errMsg);
 
             // Reset the error state
             reset_c();
@@ -175,9 +177,14 @@ SpiceRotation::computeSpin(double jd) const
 
         // ...but Celestia's rotations are reversed, thus the extra
         // call to conjugate()
-        Quaterniond q = Quaterniond(Map<Matrix3d>(matrixData)).conjugate();
+        Eigen::Quaterniond q = Eigen::Quaterniond(Eigen::Map<Eigen::Matrix3d>(matrixData)).conjugate();
 
         // Transform into Celestia's coordinate system
-        return Ry180 * Rx90.conjugate() * q.conjugate() * Rx90;
+        return math::YRot180<double> *
+               math::XRot90Conjugate<double> *
+               q.conjugate() *
+               math::XRot90<double>;
     }
 }
+
+} // end namespace celestia::ephem

@@ -20,153 +20,162 @@
 // 3. This notice may not be removed or altered from any source distribution.
 
 
-#include <cwctype>
-#include <celutil/utf8.h>
 #include "strnatcmp.h"
 
-static int right(const wchar_t *a, const wchar_t *b)
+#include <cwctype>
+#include <optional>
+
+#include <celutil/utf8.h>
+
+
+namespace
+{
+
+using MaybeChar = std::optional<std::int32_t>;
+
+
+inline bool
+isDigit(MaybeChar c)
+{
+    return c.has_value() &&
+           c >= 0 && c <= WCHAR_MAX &&
+           std::iswdigit(static_cast<std::wint_t>(*c));
+}
+
+inline bool isSpace(MaybeChar c)
+{
+    return c.has_value() &&
+           c >= 0 && c<= WCHAR_MAX &&
+           std::iswspace(*c);
+}
+
+
+class CharMapper
+{
+public:
+    explicit CharMapper(std::string_view _sv) : sv(_sv) {}
+
+    MaybeChar next()
+    {
+        auto svSize = static_cast<std::int32_t>(sv.size());
+        if (offset >= svSize)
+            return std::nullopt;
+
+        std::int32_t ch;
+        if (!UTF8Decode(sv, offset, ch))
+        {
+            offset = svSize;
+            return std::nullopt;
+        }
+
+        return ch;
+    }
+
+private:
+    std::string_view sv;
+    std::int32_t offset{ 0 };
+};
+
+
+int
+right(CharMapper& a, MaybeChar& ca, CharMapper& b, MaybeChar& cb)
 {
     int bias = 0;
-    wchar_t ca, cb;
 
     // The longest run of digits wins.  That aside, the greatest value
     // wins, but we can't know that it will until we've scanned both
     // numbers to know that they have the same magnitude, so we remember
     // it in BIAS.
-    for (;; a++, b++)
-    {
-        ca = *a;
-        cb = *b;
-
-        if (!iswdigit(ca))
-            return iswdigit(cb) ? -1 : bias;
-        if (!iswdigit(cb))
-            return +1;
-
-        if (ca < cb)
-        {
-            if (bias == 0)
-                bias = -1;
-        }
-        else if (ca > cb)
-        {
-            if (bias == 0)
-                bias = +1;
-        }
-        else if (ca == 0 && cb == 0)
-        {
-            return bias;
-        }
-    }
-    return 0;
-}
-
-
-static int left(const wchar_t *a, const wchar_t *b)
-{
-    wchar_t ca, cb;
-
-    // Compare two left-aligned numbers: the first to have a
-    // different value wins.
-    for (;; a++, b++)
-    {
-        ca = *a;
-        cb = *b;
-
-        if (!iswdigit(ca))
-           return iswdigit(cb) ? -1 : 0;
-        if (!iswdigit(cb))
-            return +1;
-        if (ca < cb)
-            return -1;
-        if (ca > cb)
-            return +1;
-    }
-
-    return 0;
-}
-
-static int strnatcmp0(const std::wstring &a, const std::wstring &b, bool fold_case)
-{
-    size_t ai = 0, bi = 0;
-    wchar_t ca, cb;
     for (;;)
     {
-        // skip over leading spaces
-        ca = a[ai];
-        while(iswspace(ca))
-            ca = a[++ai];
-
-        cb = b[bi];
-        while(iswspace(cb))
-            cb = b[++bi];
-
-        // process run of digits
-        if (iswdigit(ca) && iswdigit(cb))
-        {
-            bool frac = (ca == L'0' || cb == L'0');
-            int r = frac ? left(&a[ai], &b[bi]) : right(&a[ai], &b[bi]);
-            if (r != 0)
-                return r;
-        }
-
-        if (ca == 0 && cb == 0)
-        {
-            // The strings compare the same. Perhaps the caller
-            // will want to call strcmp to break the tie.
-            return 0;
-        }
-
-        if (fold_case)
-        {
-            ca = towupper(ca);
-            cb = towupper(cb);
-        }
-
-        if (ca < cb)
-            return -1;
-
-        if (ca > cb)
+        if (!isDigit(ca))
+            return isDigit(cb) ? -1 : bias;
+        if (!isDigit(cb))
             return +1;
 
-        ai++;
-        bi++;
+        if (bias == 0)
+        {
+            if (*ca < *cb)
+                bias = -1;
+            else if (*ca > *cb)
+                bias = 1;
+        }
+
+        ca = a.next();
+        cb = b.next();
     }
-    return 0;
 }
 
-static std::wstring utf8_to_wide(const std::string &s)
+
+int
+left(CharMapper& a, MaybeChar& ca, CharMapper& b, MaybeChar& cb)
 {
-    std::wstring w;
-    wchar_t ch;
-    for (size_t i = 0, e = s.length(); i < e; )
+    // Compare two left-aligned numbers: the first to have a
+    // different value wins.
+    for (;;)
     {
-        if (!UTF8Decode(s, i, ch))
-            break;
-        i += UTF8EncodedSize(ch);
-        w.push_back(ch);
+        if (!isDigit(ca))
+           return isDigit(cb) ? -1 : 0;
+        if (!isDigit(cb))
+            return 1;
+        if (*ca < *cb)
+            return -1;
+        if (*ca > *cb)
+            return 1;
+
+        ca = a.next();
+        cb = b.next();
     }
-    w.push_back(L'\0');
-    return w;
 }
 
-int strnatcmp(const std::string &a, const std::string &b)
+int
+strnatcmp0(CharMapper& a, CharMapper& b)
 {
-    return strnatcmp0(utf8_to_wide(a), utf8_to_wide(b), false);
+    // skip over leading space
+    MaybeChar ca = a.next();
+    while (isSpace(ca))
+        ca = a.next();
+
+    MaybeChar cb = b.next();
+    while (isSpace(cb))
+        cb = b.next();
+
+    for (;;)
+    {
+        if (!ca.has_value())
+            return cb.has_value() ? -1 : 0;
+        if (!cb.has_value())
+            return 1;
+
+        // process run of digits
+        if (std::iswdigit(*ca) && std::iswdigit(*cb))
+        {
+            int r = (*ca == L'0' || *cb == L'0')
+                ? left(a, ca, b, cb)
+                : right(a, ca, b, cb);
+            if (r != 0)
+                return r;
+            continue;
+        }
+
+        if (*ca < *cb)
+            return -1;
+
+        if (*ca > *cb)
+            return 1;
+
+        ca = a.next();
+        cb = b.next();
+    }
 }
 
-int strnatcmp(const std::wstring &wa, const std::wstring &wb)
-{
-    return strnatcmp0(wa, wb, false);
-}
+} // end unnamed namespace
 
-// Compare, recognizing numeric std::string and ignoring case.
-int strnatcasecmp(const std::string &a, const std::string &b)
-{
-    return strnatcmp0(utf8_to_wide(a), utf8_to_wide(b), true);
-}
 
-int strnatcasecmp(const std::wstring &wa, const std::wstring &wb)
+int
+strnatcmp(std::string_view a, std::string_view b)
 {
-    return strnatcmp0(wa, wb, true);
+    CharMapper aMapper{a};
+    CharMapper bMapper{b};
+    return strnatcmp0(aMapper, bMapper);
 }

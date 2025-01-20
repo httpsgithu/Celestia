@@ -140,7 +140,7 @@ istream& operator>>(istream& in, QuotedString& qs)
     char c = '\0';
 
     in >> c;
-    while (in && isspace(c))
+    while (in && std::isspace(static_cast<unsigned char>(c)))
     {
         in >> c;
     }
@@ -381,9 +381,6 @@ bool convertSpkToXyzv(const Configuration& config,
 
     printRecord(out, et, lastState);
 
-    int sampCount = 0;
-    int nTests = 0;
-
     while (t < endET)
     {
         // Make sure that we don't go past the end of the sample interval
@@ -399,7 +396,6 @@ bool convertSpkToXyzv(const Configuration& config,
                                          s1.position,
                                          s1.velocity * dt,
                                          0.5);
-        nTests++;
 
         double positionError = (pInterp - pTest).length();
 
@@ -420,7 +416,6 @@ bool convertSpkToXyzv(const Configuration& config,
                                            s1.position,
                                            s1.velocity * dt,
                                            0.5);
-                nTests++;
 
                 positionError = (pInterp - pTest).length();
             }
@@ -444,8 +439,6 @@ bool convertSpkToXyzv(const Configuration& config,
                                            s1.velocity * dt,
                                            0.5);
 
-                nTests++;
-
                 positionError = (pInterp - pTest).length();
             }
         }
@@ -454,7 +447,6 @@ bool convertSpkToXyzv(const Configuration& config,
         lastState = s1;
 
         printRecord(out, t, lastState);
-        sampCount++;
     }
 
     return true;
@@ -588,7 +580,7 @@ int main(int argc, char* argv[])
     }
 
     // Load the leap second kernel
-#if defined(_WIN32) || defined(NATIVE_OSX_APP)
+#if defined(_WIN32)
     furnsh_c("naif0012.tls");
 #else
     furnsh_c(CONFIG_DATA_DIR "/" "naif0012.tls");

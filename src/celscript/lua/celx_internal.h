@@ -10,12 +10,15 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELX_INTERNAL_H_
-#define _CELX_INTERNAL_H_
+#pragma once
 
+#include <cassert>
+#include <iterator>
 #include <memory>
 #include <map>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <celutil/color.h>
@@ -43,6 +46,11 @@ enum
     Celx_Category = 13
 };
 
+template<typename T> int celxClassId(T)
+{
+    assert(false);
+    return -1;
+}
 
 // select which type of error will be fatal (call lua_error) and
 // which will return a default value instead
@@ -140,7 +148,7 @@ public:
 
     template <typename T> T *newUserData()
     {
-        return reinterpret_cast<T*>(lua_newuserdata(m_lua, sizeof(T)));
+        return static_cast<T*>(lua_newuserdata(m_lua, sizeof(T)));
     }
     template <typename T> T *newUserData(T a)
     {
@@ -151,11 +159,11 @@ public:
     }
     template <typename T> T *newUserDataArray(int n)
     {
-        return reinterpret_cast<T*>(lua_newuserdata(m_lua, sizeof(T) * n));
+        return static_cast<T*>(lua_newuserdata(m_lua, sizeof(T) * n));
     }
     template <typename T> T *newUserDataArray(T *a, int n)
     {
-        T *p = reinterpret_cast<T*>(lua_newuserdata(m_lua, sizeof(T) * n));
+        T *p = static_cast<T*>(lua_newuserdata(m_lua, sizeof(T) * n));
         std::copy(a, a + n, p);
         return p;
     }
@@ -180,7 +188,7 @@ public:
         lua_replace(l, CelxLua::localIndex(2));
         return celx.pushClass(ret);
     }
-    template<typename V, typename K> static V value(std::pair<const K, V> &v)
+    template<typename V, typename K> static V value(const std::pair<const K, V> &v)
     {
         return v.second;
     }
@@ -188,22 +196,28 @@ public:
     {
         return it;
     }
-    template<typename T, typename C> int pushIterable(C& a)
+    template<typename T, typename It>
+    int pushIterable(It begin, It end)
     {
         CelxLua celx(m_lua);
-        int n = a.size();
-        T *array = celx.newUserDataArray<T>(n);
-        for (auto &it : a)
+        auto n = static_cast<int>(std::distance(begin, end));
+        T* array = celx.newUserDataArray<T>(n);
+        for (auto it = begin; it != end; ++it)
         {
-            *array = value(it);
-            array++;
+            *array = value(*it);
+            ++array;
         }
         celx.push(n - 1);
         celx.push(iterator<T>, 2);
-
         return 1;
     }
-    template<typename T, typename C> int pushIterable(C *a)
+    template<typename T, typename C, std::enable_if_t<!std::is_pointer_v<C>, int> = 0>
+    int pushIterable(const C& a)
+    {
+        return pushIterable<T>(std::begin(a), std::end(a));
+    }
+    template<typename T, typename C, std::enable_if_t<!std::is_pointer_v<C>, int> = 0>
+    int pushIterable(const C *a)
     {
         if (a == nullptr)
             return 0;
@@ -227,7 +241,7 @@ public:
     double getNumber(int n = 0) const { return lua_tonumber(m_lua, n); }
     bool getBoolean(int n = 0) const { return lua_toboolean(m_lua, n) == 1; }
     const char *getString(int n = 0) const { return lua_tostring(m_lua, n); }
-    Value *getValue(int n = 0);
+    Value getValue(int n = 0);
     template<typename T> T *getUserData(int n = 0) const
     {
         return static_cast<T*>(lua_touserdata(m_lua, n));
@@ -301,7 +315,7 @@ public:
         if (!safeIsValid(index))
             return nullptr;
         if (isUserData(index))
-            return reinterpret_cast<T*>(lua_touserdata(m_lua, index));
+            return static_cast<T*>(lua_touserdata(m_lua, index));
 
         if (errors & WrongType)
             doError(errorMessage);
@@ -328,7 +342,7 @@ public:
     }
 
     LuaState* getLuaStateObject();
-    static const char* ClassNames[];
+    static std::string_view classNameForId(int id);
 
 private:
     lua_State* m_lua;
@@ -352,5 +366,3 @@ lua_Number Celx_SafeGetNumber(lua_State* l, int index, FatalErrors fatalErrors =
 bool Celx_SafeGetBoolean(lua_State* l, int index, FatalErrors fatalErrors = AllErrors,
                               const char* errorMsg = "Boolean argument expected",
                               bool defaultValue = false);
-
-#endif // _CELX_INTERNAL_H_

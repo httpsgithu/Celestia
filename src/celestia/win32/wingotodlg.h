@@ -9,22 +9,24 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _WINGOTODLG_H_
-#define _WINGOTODLG_H_
+#pragma once
 
-#include "celestia/celestiacore.h"
+#include <windows.h>
 
+class CelestiaCore;
+
+namespace celestia::win32
+{
 
 class GotoObjectDialog
 {
- public:
+public:
     GotoObjectDialog(HINSTANCE, HWND, CelestiaCore*);
 
- public:
+public:
     CelestiaCore* appCore;
     HWND parent;
     HWND hwnd;
 };
 
-
-#endif // _WINGOTODLG_H_
+} // end namespace celestia::win32

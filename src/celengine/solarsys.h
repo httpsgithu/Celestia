@@ -7,16 +7,22 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _SOLARSYS_H_
-#define _SOLARSYS_H_
+#pragma once
 
-#include <vector>
+#include <cstdint>
+#include <iosfwd>
 #include <map>
-#include <iostream>
-#include <celengine/body.h>
-#include <celengine/stardb.h>
+#include <memory>
+
+#include <Eigen/Core>
+
+#include <celcompat/filesystem.h>
+
 
 class FrameTree;
+class PlanetarySystem;
+class Star;
+class Universe;
 
 class SolarSystem
 {
@@ -31,17 +37,12 @@ class SolarSystem
 
  private:
     Star* star;
-    PlanetarySystem* planets;
-    FrameTree* frameTree;
+    std::unique_ptr<PlanetarySystem> planets;
+    std::unique_ptr<FrameTree> frameTree;
 };
 
-typedef std::map<uint32_t, SolarSystem*> SolarSystemCatalog;
-
-class Universe;
+using SolarSystemCatalog = std::map<std::uint32_t, std::unique_ptr<SolarSystem>>;
 
 bool LoadSolarSystemObjects(std::istream& in,
                             Universe& universe,
                             const fs::path& dir = fs::path());
-
-#endif // _SOLARSYS_H_
-

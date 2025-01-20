@@ -1,5 +1,6 @@
 // texmanager.h
 //
+// Copyright (C) 2001-present, Celestia Development Team
 // Copyright (C) 2001 Chris Laurel <claurel@shatters.net>
 //
 // This program is free software; you can redistribute it and/or
@@ -7,30 +8,40 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _TEXMANAGER_H_
-#define _TEXMANAGER_H_
+#pragma once
 
+#include <memory>
+#include <tuple>
+
+#include <celcompat/filesystem.h>
 #include <celutil/resmanager.h>
-#include <celengine/texture.h>
 #include "multitexture.h"
+#include "texture.h"
 
-
-class TextureInfo : public ResourceInfo<Texture>
+class TextureInfo
 {
- public:
+private:
     fs::path source;
     fs::path path;
     unsigned int flags;
     float bumpHeight;
     unsigned int resolution;
 
-    enum {
+    friend bool operator<(const TextureInfo&, const TextureInfo&);
+
+public:
+    using ResourceType = Texture;
+    using ResourceKey = fs::path;
+
+    enum
+    {
         WrapTexture      = 0x1,
         CompressTexture  = 0x2,
         NoMipMaps        = 0x4,
         AutoMipMaps      = 0x8,
         AllowSplitting   = 0x10,
         BorderClamp      = 0x20,
+        LinearColorspace = 0x40,
     };
 
     TextureInfo(const fs::path& _source,
@@ -63,28 +74,16 @@ class TextureInfo : public ResourceInfo<Texture>
         bumpHeight(0.0f),
         resolution(_resolution) {};
 
-    fs::path resolve(const fs::path&) override;
-    Texture* load(const fs::path&) override;
+    fs::path resolve(const fs::path&) const;
+    std::unique_ptr<Texture> load(const fs::path&) const;
 };
 
 inline bool operator<(const TextureInfo& ti0, const TextureInfo& ti1)
 {
-    if (ti0.resolution == ti1.resolution)
-    {
-        if (ti0.source == ti1.source)
-            return ti0.path < ti1.path;
-        else
-            return ti0.source < ti1.source;
-    }
-    else
-    {
-        return ti0.resolution < ti1.resolution;
-    }
+    return std::tie(ti0.resolution, ti0.source, ti0.path) <
+           std::tie(ti1.resolution, ti1.source, ti1.path);
 }
 
-typedef ResourceManager<TextureInfo> TextureManager;
+using TextureManager = ResourceManager<TextureInfo>;
 
-extern TextureManager* GetTextureManager();
-
-#endif // _TEXMANAGER_H_
-
+TextureManager* GetTextureManager();

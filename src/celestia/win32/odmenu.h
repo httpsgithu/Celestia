@@ -1,11 +1,14 @@
-#ifndef _ODMENU_CLW
-#define _ODMENU_CLW
+#pragma once
 
-#include <windows.h>
+#include <array>
 #include <map>
-#include <string>
 
-using namespace std;
+#include <Windows.h>
+
+#include "tstring.h"
+
+namespace celestia::win32
+{
 
 enum bitmapType {eNormal, eDisabled, eShadow, eFaded};
 
@@ -13,19 +16,32 @@ typedef struct tagODMENUITEM
 {
     UINT dwType;
     UINT wID;
-    string rawText;
-    string displayText;
-    string rawDisplayText;
-    string shortcutText;
+    tstring rawText;
+    tstring displayText;
+    tstring rawDisplayText;
+    tstring shortcutText;
     HBITMAP hBitmap;
     bool topMost;
 
 } ODMENUITEM;
 
-typedef map<UINT, ODMENUITEM> ODMENUITEMS;
+using ODMENUITEMS = std::map<UINT, ODMENUITEM>;
 
 class ODMenu
 {
+public:
+    ODMenu();
+    ~ODMenu();
+
+    bool Init(HWND hOwnerWnd, HMENU hMenu);
+    void MeasureItem(HWND hWnd, LPARAM lParam) const;
+    void DrawItem(HWND hWnd, LPARAM lParam) const;
+    void OnDestroy();
+    void SetItemImage(HINSTANCE hInst, UINT wID, UINT idBitmap);
+    void AddItem(HMENU hMenu, int index, MENUITEMINFO* pItemInfo=NULL);
+    void DeleteItem(HMENU hMenu, int index);
+
+private:
     //Aesthetic parameters
     COLORREF m_clrIconBar;
     COLORREF m_clrTranparent;
@@ -60,38 +76,21 @@ class ODMenu
 
     UINT m_seqNumber;
     HMENU m_hRootMenu;
-    TCHAR m_szItemText[256];
+    std::array<TCHAR, 256> m_szItemText;
     ODMENUITEMS m_menuItems;
-
-    int m_alpDx[256];
 
     void EnumMenuItems(HMENU hMenu);
     void DeleteSubMenu(HMENU hMenu);
     void SetMenuItemOwnerDrawn(HMENU hMenu, UINT item, UINT type);
-    void GenerateDisplayText(ODMENUITEM& item);
-    void DrawItemText(DRAWITEMSTRUCT* lpdis, ODMENUITEM& item);
-    void DrawIconBar(DRAWITEMSTRUCT* lpdis, ODMENUITEM& item);
-    void ComputeMenuTextPos(DRAWITEMSTRUCT* lpdis, ODMENUITEM& item, int& x, int& y, SIZE& size);
-    void DrawTransparentBitmap(HDC hDC, HBITMAP hBitmap, short xStart, short yStart,
-            COLORREF cTransparentColor, bitmapType eType=eNormal);
-    void DrawCheckMark(HDC hDC, short x, short y, bool bNarrow=true);
-    COLORREF LightenColor(COLORREF col, double factor);
-    COLORREF DarkenColor(COLORREF col, double factor);
-    COLORREF AverageColor(COLORREF col1, COLORREF col2, double weight1=0.5);
-    double GetColorIntensity(COLORREF col);
-
-public:
-    ODMenu();
-    ~ODMenu();
-
-    bool Init(HWND hOwnerWnd, HMENU hMenu);
-    void MeasureItem(HWND hWnd, LPARAM lParam);
-    void DrawItem(HWND hWnd, LPARAM lParam);
-    void OnDestroy();
-    bool GetItem(UINT id, ODMENUITEM** ppItem);
-    void SetItemImage(HINSTANCE hInst, UINT wID, UINT idBitmap);
-    void AddItem(HMENU hMenu, int index, MENUITEMINFO* pItemInfo=NULL);
-    void DeleteItem(HMENU hMenu, int index);
+    void DrawItemText(const DRAWITEMSTRUCT* lpdis, const ODMENUITEM& item) const;
+    void DrawIconBar(HWND hWnd, const DRAWITEMSTRUCT* lpdis, const ODMENUITEM& item) const;
+    void ComputeMenuTextPos(const DRAWITEMSTRUCT* lpdis,
+                            const ODMENUITEM& item,
+                            int& x, int& y,
+                            const SIZE& size) const;
+    void DrawTransparentBitmap(HWND hWnd, HDC hDC, HBITMAP hBitmap, short centerX, short centerY,
+                               COLORREF cTransparentColor, bitmapType eType=eNormal) const;
+    void DrawCheckMark(HWND hWnd, HDC hDC, short centerX, short centerY, bool bNarrow=true) const;
 };
 
-#endif
+} // end namespace celestia::win32

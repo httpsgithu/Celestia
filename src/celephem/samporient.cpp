@@ -12,29 +12,24 @@
 // of the License, or (at your option) any later version.
 
 #include "samporient.h"
-#include <celmath/mathlib.h>
-#include <celmath/geomutil.h>
-#include <cmath>
+
 #include <cassert>
-#include <string>
-#include <algorithm>
+#include <cstdint>
+#include <istream>
+#include <utility>
 #include <vector>
-#include <iostream>
-#include <fstream>
 
-using namespace Eigen;
-using namespace std;
-using namespace celmath;
+#include <Eigen/Geometry>
 
-struct OrientationSample
+#include <celmath/geomutil.h>
+#include "rotation.h"
+#include "sampfile.h"
+
+namespace celestia::ephem
 {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    Eigen::Quaternionf q;
-    double t;
-};
-
-typedef vector<OrientationSample, aligned_allocator<OrientationSample> > OrientationSampleVector;
+namespace
+{
 
 /*!
  * Sampled orientation files are ASCII text files containing a sequence of
@@ -59,16 +54,6 @@ typedef vector<OrientationSample, aligned_allocator<OrientationSample> > Orienta
  * a single line.
  */
 
-// 90 degree rotation about x-axis to convert orientation to Celestia's
-// coordinate system.
-static Quaternionf coordSysCorrection = XRotation((float) (PI / 2.0));
-
-
-bool operator<(const OrientationSample& a, const OrientationSample& b)
-{
-    return a.t < b.t;
-}
-
 /*! SampledOrientation is a rotation model that interpolates a sequence
  *  of quaternion keyframes. Typically, an instance of SampledRotation will
  *  be created from a file with LoadSampledOrientation().
@@ -76,13 +61,8 @@ bool operator<(const OrientationSample& a, const OrientationSample& b)
 class SampledOrientation : public RotationModel
 {
 public:
-    SampledOrientation() = default;
+    SampledOrientation(std::vector<double>&&, std::vector<Eigen::Quaternionf>&&);
     ~SampledOrientation() override = default;
-
-    /*! Add another quaternion key to the sampled orientation. The keys
-     *  should have monotonically increasing time values.
-     */
-    void addSample(double tjd, const Quaternionf& q);
 
     /*! The orientation of a sampled rotation model is entirely due
      *  to spin (i.e. there's no notion of an equatorial frame.)
@@ -95,30 +75,31 @@ public:
     void getValidRange(double& begin, double& end) const override;
 
 private:
-    Quaternionf getOrientation(double tjd) const;
+    Eigen::Quaternionf getOrientation(double tjd) const;
 
-private:
-    OrientationSampleVector samples;
-    mutable int lastSample{0};
-
-    enum InterpolationType
-    {
-        Linear = 0,
-        Cubic = 1,
-    };
-
-    InterpolationType interpolation{Linear};
+    // Storing sample times and rotations separately avoids padding due to
+    // the 16-byte alignment of Quaternionf
+    std::vector<double> sampleTimes;
+    std::vector<Eigen::Quaternionf> rotations;
+    mutable std::uint32_t lastSample{0};
 };
 
 
-void
-SampledOrientation::addSample(double t, const Eigen::Quaternionf& q)
+SampledOrientation::SampledOrientation(std::vector<double>&& _sampleTimes,
+                                       std::vector<Eigen::Quaternionf>&& _rotations) :
+    sampleTimes(std::move(_sampleTimes)),
+    rotations(std::move(_rotations))
 {
-    // TODO: add a check for out of sequence samples
-    OrientationSample samp;
-    samp.t = t;
-    samp.q = q * coordSysCorrection;
-    samples.push_back(samp);
+    assert(!sampleTimes.empty() && sampleTimes.size() == rotations.size());
+    sampleTimes.shrink_to_fit();
+    rotations.shrink_to_fit();
+
+    // Apply a 90-degree rotation around the x-axis to convert the orientation
+    // to Celestia's coordinate system
+    for (Eigen::Quaternionf& rotation : rotations)
+    {
+        rotation *= math::XRot90<float>;
+    }
 }
 
 
@@ -130,119 +111,63 @@ SampledOrientation::spin(double tjd) const
 }
 
 
-double SampledOrientation::getPeriod() const
+double
+SampledOrientation::getPeriod() const
 {
-    return samples[samples.size() - 1].t - samples[0].t;
+    return sampleTimes.back() - sampleTimes.front();
 }
 
 
-bool SampledOrientation::isPeriodic() const
+bool
+SampledOrientation::isPeriodic() const
 {
     return false;
 }
 
 
-void SampledOrientation::getValidRange(double& begin, double& end) const
+void
+SampledOrientation::getValidRange(double& begin, double& end) const
 {
-    begin = samples[0].t;
-    end = samples[samples.size() - 1].t;
+    begin = sampleTimes.front();
+    end = sampleTimes.back();
 }
 
 
-Quaternionf
+Eigen::Quaternionf
 SampledOrientation::getOrientation(double tjd) const
 {
-    Quaternionf orientation;
-    if (samples.size() == 0)
-    {
-        orientation = Quaternionf::Identity();
-    }
-    else if (samples.size() == 1)
-    {
-        orientation = samples[0].q;
-    }
-    else
-    {
-        OrientationSample samp;
-        samp.t = tjd;
-        int n = lastSample;
+    if (sampleTimes.size() == 1)
+        return rotations.front();
 
-        // Do a binary search to find the samples that define the orientation
-        // at the current time. Cache the previous sample used and avoid
-        // the search if the covers the requested time.
-        if (n < 1 || n >= (int) samples.size() || tjd < samples[n - 1].t || tjd > samples[n].t)
-        {
-            OrientationSampleVector::const_iterator iter = lower_bound(samples.begin(),
-                                                                       samples.end(),
-                                                                       samp);
-            if (iter == samples.end())
-                n = samples.size();
-            else
-                n = iter - samples.begin();
+    std::uint32_t n = GetSampleIndex(tjd, lastSample, sampleTimes);
+    if (n == 0)
+        return rotations.front();
+    else if (n == sampleTimes.size())
+        return rotations.back();
 
-            lastSample = n;
-        }
-
-        if (n == 0)
-        {
-            orientation = samples[0].q;
-        }
-        else if (n < (int) samples.size())
-        {
-            if (interpolation == Linear)
-            {
-                OrientationSample s0 = samples[n - 1];
-                OrientationSample s1 = samples[n];
-
-                auto t = (float) ((tjd - s0.t) / (s1.t - s0.t));
-                orientation = s0.q.slerp(t, s1.q);
-            }
-            else if (interpolation == Cubic)
-            {
-                // TODO: add support for cubic interpolation of quaternions
-                assert(0);
-            }
-            else
-            {
-                // Unknown interpolation type
-                orientation = Quaternionf::Identity();
-            }
-        }
-        else
-        {
-            orientation = samples[samples.size() - 1].q;
-        }
-    }
-
-    return orientation;
+    auto t = static_cast<float>((tjd - sampleTimes[n - 1]) / (sampleTimes[n] - sampleTimes[n - 1]));
+    return rotations[n - 1].slerp(t, rotations[n]);
 }
 
+} // end unnamed namespace
 
-RotationModel* LoadSampledOrientation(const fs::path& filename)
+std::shared_ptr<const RotationModel>
+LoadSampledOrientation(const fs::path& filename)
 {
-    ifstream in(filename.string());
-    if (!in.good())
-        return nullptr;
+    std::vector<double> sampleTimes;
+    std::vector<Eigen::Quaternionf> samples;
 
-    auto* sampOrientation = new SampledOrientation();
-    int nSamples = 0;
-    while (in.good())
+    if (!LoadAsciiSamples(filename, sampleTimes, samples,
+                          [](std::istream& in, double& tdb, Eigen::Quaternionf& q)
+                          {
+                              return (in >> tdb >> q.w() >> q.x() >> q.y() >> q.z()).good();
+                          }))
     {
-        double tjd;
-        Quaternionf q;
-        in >> tjd;
-        in >> q.w();
-        in >> q.x();
-        in >> q.y();
-        in >> q.z();
-        q.normalize();
-
-        if (in.good())
-        {
-            sampOrientation->addSample(tjd, q);
-            nSamples++;
-        }
+        return nullptr;
     }
 
-    return sampOrientation;
+    return std::make_shared<SampledOrientation>(std::move(sampleTimes),
+                                                std::move(samples));
 }
+
+} // end namespace celestia::ephem

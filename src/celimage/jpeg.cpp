@@ -10,17 +10,21 @@
 
 #include <cstdio>  // fopen, fclose
 #include <cstring> // memcpy
+#include <memory>
 #include <setjmp.h>
-extern "C" {
+extern "C"
+{
 #include <jpeglib.h>
 }
-#include <celengine/image.h>
-#include <celutil/debug.h>
+#include <celutil/gettext.h>
+#include <celutil/logger.h>
+#include "image.h"
 
-using celestia::PixelFormat;
-
+namespace celestia::engine
+{
 namespace
 {
+
 struct my_error_mgr
 {
     struct jpeg_error_mgr pub;  // "public" fields
@@ -41,9 +45,82 @@ METHODDEF(void) my_error_exit(j_common_ptr cinfo)
     // Return control to the setjmp point
     longjmp(myerr->setjmp_buffer, 1);
 }
+
+bool SaveJPEGImage(const fs::path& filename,
+                   int width, int height,
+                   int rowStride,
+                   const std::uint8_t *pixels,
+                   bool removeAlpha)
+{
+#ifdef _WIN32
+    FILE* out = _wfopen(filename.c_str(), L"wb");
+#else
+    FILE* out = fopen(filename.c_str(), "wb");
+#endif
+    if (out == nullptr)
+    {
+        util::GetLogger()->error("Can't open screen capture file '{}'\n", filename);
+        return false;
+    }
+
+    struct jpeg_compress_struct cinfo;
+
+    struct jpeg_error_mgr jerr;
+    JSAMPROW row[1];
+
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+
+    jpeg_stdio_dest(&cinfo, out);
+
+    cinfo.image_width = width;
+    cinfo.image_height = height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+
+    jpeg_set_quality(&cinfo, 90, TRUE);
+
+    jpeg_start_compress(&cinfo, TRUE);
+
+    std::unique_ptr<std::uint8_t[]> rowOut;
+    if (removeAlpha)
+        rowOut = std::make_unique<std::uint8_t[]>(width * 3);
+
+    while (cinfo.next_scanline < cinfo.image_height)
+    {
+        const std::uint8_t *rowHead = &pixels[rowStride * cinfo.next_scanline];
+        // Strip alpha values if we are in RGBA format
+        if (removeAlpha)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                const std::uint8_t* pixelIn = &rowHead[x * 4];
+                std::uint8_t* pixelOut = &rowOut.get()[x * 3];
+                pixelOut[0] = pixelIn[0];
+                pixelOut[1] = pixelIn[1];
+                pixelOut[2] = pixelIn[2];
+            }
+            row[0] = rowOut.get();
+        }
+        else
+        {
+            row[0] = const_cast<std::uint8_t*>(rowHead); //NOSONAR
+        }
+        (void) jpeg_write_scanlines(&cinfo, row, 1);
+    }
+
+    jpeg_finish_compress(&cinfo);
+    fclose(out);
+    jpeg_destroy_compress(&cinfo);
+
+    return true;
+}
+
 } // anonymous namespace
 
-Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
+Image* LoadJPEGImage(const fs::path& filename)
 {
     Image* img = nullptr;
 
@@ -56,23 +133,24 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
     // struct, to avoid dangling-pointer problems.
     struct my_error_mgr jerr;
     // More stuff
-    JSAMPARRAY buffer;        // Output row buffer
-    int row_stride;        // physical row width in output buffer
-    long cont;
+    JSAMPARRAY buffer; // Output row buffer
+    int row_stride;    // physical row width in output buffer
 
     // In this example we want to open the input file before doing anything else,
     // so that the setjmp() error recovery below can assume the file is open.
     // VERY IMPORTANT: use "b" option to fopen() if you are on a machine that
     // requires it in order to read binary files.
 
-    FILE *in;
 #ifdef _WIN32
-    in = _wfopen(filename.c_str(), L"rb");
+    FILE *in = _wfopen(filename.c_str(), L"rb");
 #else
-    in = fopen(filename.c_str(), "rb");
+    FILE *in = fopen(filename.c_str(), "rb");
 #endif
-    if (!in)
+    if (in == nullptr)
+    {
+        util::GetLogger()->error(_("Could not open JPEG file {}\n"), filename);
         return nullptr;
+    }
 
     // Step 1: allocate and initialize JPEG decompression object
     // We set up the normal JPEG error routines, then override error_exit.
@@ -87,6 +165,7 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
         fclose(in);
         delete img;
 
+        util::GetLogger()->error(_("Error reading JPEG image: {}\n"), filename);
         return nullptr;
     }
 
@@ -98,6 +177,15 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
 
     // Step 3: read file parameters with jpeg_read_header()
     (void) jpeg_read_header(&cinfo, TRUE);
+
+    if (cinfo.image_width == 0 || cinfo.image_width > Image::MAX_DIMENSION ||
+        cinfo.image_height == 0 || cinfo.image_height > Image::MAX_DIMENSION)
+    {
+        jpeg_destroy_decompress(&cinfo);
+        fclose(in);
+        util::GetLogger()->error(_("JPEG dimensions out of range: {}\n"), filename);
+        return nullptr;
+    }
 
     // We can ignore the return value from jpeg_read_header since
     //  (a) suspension is not possible with the stdio data source, and
@@ -133,12 +221,12 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
 
     PixelFormat format = PixelFormat::RGB;
     if (cinfo.output_components == 1)
-        format = PixelFormat::LUMINANCE;
+        format = PixelFormat::Luminance;
 
     img = new Image(format, cinfo.image_width, cinfo.image_height);
 
     // cont = cinfo.output_height - 1;
-    cont = 0;
+    int cont = 0;
     while (cinfo.output_scanline < cinfo.output_height)
     {
         // jpeg_read_scanlines expects an array of pointers to scanlines.
@@ -148,7 +236,7 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
 
         // Assume put_scanline_someplace wants a pointer and sample count.
         // put_scanline_someplace(buffer[0], row_stride);
-        memcpy(img->getPixelRow(cont), buffer[0], row_stride);
+        std::memcpy(img->getPixelRow(cont), buffer[0], row_stride);
         cont++;
     }
 
@@ -176,72 +264,7 @@ Image* LoadJPEGImage(const fs::path& filename, int /*unused*/)
     return img;
 }
 
-bool SaveJPEGImage(const fs::path& filename,
-                   int width, int height,
-                   int rowStride,
-                   unsigned char *pixels,
-                   bool removeAlpha)
-{
-    FILE* out;
-#ifdef _WIN32
-    out = _wfopen(filename.c_str(), L"wb");
-#else
-    out = fopen(filename.c_str(), "wb");
-#endif
-    if (out == nullptr)
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "Can't open screen capture file '%s'\n", filename);
-        return false;
-    }
-
-    struct jpeg_compress_struct cinfo;
-
-    struct jpeg_error_mgr jerr;
-    JSAMPROW row[1];
-
-    cinfo.err = jpeg_std_error(&jerr);
-    jpeg_create_compress(&cinfo);
-
-    jpeg_stdio_dest(&cinfo, out);
-
-    cinfo.image_width = width;
-    cinfo.image_height = height;
-    cinfo.input_components = 3;
-    cinfo.in_color_space = JCS_RGB;
-
-    jpeg_set_defaults(&cinfo);
-
-    jpeg_set_quality(&cinfo, 90, TRUE);
-
-    jpeg_start_compress(&cinfo, TRUE);
-
-    while (cinfo.next_scanline < cinfo.image_height)
-    {
-        unsigned char *rowHead = &pixels[rowStride * cinfo.next_scanline];
-        // Strip alpha values if we are in RGBA format
-        if (removeAlpha)
-        {
-            for (int x = 0; x < width; x++)
-            {
-                const unsigned char* pixelIn = &rowHead[x * 4];
-                unsigned char* pixelOut = &rowHead[x * 3];
-                pixelOut[0] = pixelIn[0];
-                pixelOut[1] = pixelIn[1];
-                pixelOut[2] = pixelIn[2];
-            }
-        }
-        row[0] = rowHead;
-        (void) jpeg_write_scanlines(&cinfo, row, 1);
-    }
-
-    jpeg_finish_compress(&cinfo);
-    fclose(out);
-    jpeg_destroy_compress(&cinfo);
-
-    return true;
-}
-
-bool SaveJPEGImage(const fs::path& filename, Image& image)
+bool SaveJPEGImage(const fs::path& filename, const Image& image)
 {
     return SaveJPEGImage(filename,
                          image.getWidth(),
@@ -250,3 +273,5 @@ bool SaveJPEGImage(const fs::path& filename, Image& image)
                          image.getPixels(),
                          image.hasAlpha());
 }
+
+} // namespace celestia::engine

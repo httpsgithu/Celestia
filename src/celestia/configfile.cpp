@@ -7,391 +7,286 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <config.h>
-#include <iostream>
-#include <fstream>
-#include <cassert>
-#include <celutil/debug.h>
-#include <celutil/fsutils.h>
-#include <celutil/util.h>
-#include <celengine/texmanager.h>
-#include <celengine/tokenizer.h>
 #include "configfile.h"
 
-using namespace std;
-using namespace celestia::util;
+#include <config.h>
+#include <fstream>
+#include <type_traits>
 
-static unsigned int getUint(Hash* params,
-                            const string& paramName,
-                            unsigned int defaultValue)
+#include <celengine/hash.h>
+#include <celengine/parser.h>
+#include <celengine/texmanager.h>
+#include <celengine/value.h>
+#include <celutil/fsutils.h>
+#include <celutil/logger.h>
+#include <celutil/tokenizer.h>
+
+
+using namespace std::string_view_literals;
+using celestia::util::GetLogger;
+
+
+namespace
 {
-    double value = 0.0;
-    if (params->getNumber(paramName, value))
-        return (unsigned int) value;
 
-    return defaultValue;
+void
+applyBoolean(bool& target, const Hash& hash, std::string_view key)
+{
+    auto b = hash.getBoolean(key);
+    if (b.has_value())
+        target = *b;
 }
 
 
-CelestiaConfig* ReadCelestiaConfig(const fs::path& filename, CelestiaConfig *config)
+template<typename T, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
+void
+applyNumber(T& target, const Hash& hash, std::string_view key)
 {
-    ifstream configFile(filename.string());
+    auto number = hash.getNumber<T>(key);
+    if (number.has_value())
+        target = *number;
+}
+
+
+void
+applyString(std::string& target, const Hash& hash, std::string_view key)
+{
+    auto str = hash.getString(key);
+    if (str != nullptr)
+        target = *str;
+}
+
+
+void
+applyPath(fs::path& target, const Hash& hash, std::string_view key)
+{
+    auto path = hash.getPath(key);
+    if (path.has_value())
+        target = *path;
+}
+
+
+void
+applyTexture(MultiResTexture& target, const Hash& hash, std::string_view key)
+{
+    auto source = hash.getPath(key);
+    if (source.has_value())
+        target.setTexture(*source, "textures");
+}
+
+
+void
+applyStringArray(std::vector<std::string>& target, const Hash& hash, std::string_view key)
+{
+    auto value = hash.getValue(key);
+    if (value == nullptr)
+        return;
+
+    if (auto array = value->getArray(); array != nullptr)
+    {
+        for (const auto& item : *array)
+        {
+            auto itemStr = item.getString();
+            if (itemStr == nullptr)
+            {
+                GetLogger()->error("Found non-string value in {} array.\n", key);
+                break;
+            }
+
+            target.emplace_back(*itemStr);
+        }
+    }
+    else
+        GetLogger()->error("{} must be an array of strings.\n", key);
+}
+
+
+void
+applyPathArray(std::vector<fs::path>& target, const Hash& hash, std::string_view key)
+{
+    auto value = hash.getValue(key);
+    if (value == nullptr)
+        return;
+
+    if (auto array = value->getArray(); array != nullptr)
+    {
+        for (const auto& item : *array)
+        {
+            auto itemStr = item.getString();
+            if (itemStr == nullptr)
+            {
+                GetLogger()->error("Found non-string value in {} array.\n", key);
+                break;
+            }
+
+            target.emplace_back(celestia::util::PathExp(fs::u8path(*itemStr)));
+        }
+    }
+    else if (auto str = value->getString(); str != nullptr)
+        target.emplace_back(celestia::util::PathExp(fs::u8path(*str)));
+    else
+        GetLogger()->error("{} must be a string or an array of strings.\n", key);
+}
+
+
+void
+applyPaths(CelestiaConfig::Paths& paths, const Hash& hash)
+{
+    applyPath(paths.starDatabaseFile, hash, "StarDatabase"sv);
+    applyPath(paths.starNamesFile, hash, "StarNameDatabase"sv);
+    applyPathArray(paths.solarSystemFiles, hash, "SolarSystemCatalogs"sv);
+    applyPathArray(paths.starCatalogFiles, hash, "StarCatalogs"sv);
+    applyPathArray(paths.dsoCatalogFiles, hash, "DeepSkyCatalogs"sv);
+    applyPathArray(paths.extrasDirs, hash, "ExtrasDirectories"sv);
+    applyPathArray(paths.skipExtras, hash, "SkipExtras"sv);
+    applyPath(paths.asterismsFile, hash, "AsterismsFile"sv);
+    applyPath(paths.boundariesFile, hash, "BoundariesFile"sv);
+    applyPath(paths.favoritesFile, hash, "FavoritesFile"sv);
+    applyPath(paths.initScriptFile, hash, "InitScript"sv);
+    applyPath(paths.demoScriptFile, hash, "DemoScript"sv);
+    applyPath(paths.destinationsFile, hash, "DestinationFile"sv);
+    applyPath(paths.HDCrossIndexFile, hash, "HDCrossIndex"sv);
+    applyPath(paths.SAOCrossIndexFile, hash, "SAOCrossIndex"sv);
+    applyPath(paths.warpMeshFile, hash, "WarpMeshFile"sv);
+    applyPath(paths.leapSecondsFile, hash, "LeapSecondsFile"sv);
+#ifdef CELX
+    applyPath(paths.scriptScreenshotDirectory, hash, "ScriptScreenshotDirectory"sv);
+    applyPath(paths.luaHook, hash, "LuaHook"sv);
+#endif
+}
+
+
+void
+applyFonts(CelestiaConfig::Fonts& fonts, const Hash& hash)
+{
+    applyPath(fonts.mainFont, hash, "Font"sv);
+    applyPath(fonts.labelFont, hash, "LabelFont"sv);
+    applyPath(fonts.titleFont, hash, "TitleFont"sv);
+}
+
+
+void
+applyMouse(CelestiaConfig::Mouse& mouse, const Hash& hash)
+{
+    applyString(mouse.cursor, hash, "Cursor"sv);
+    applyNumber(mouse.rotateAcceleration, hash, "RotateAcceleration"sv);
+    applyNumber(mouse.rotationSensitivity, hash, "MouseRotationSensitivity"sv);
+    applyBoolean(mouse.reverseWheel, hash, "ReverseMouseWheel"sv);
+    applyBoolean(mouse.rayBasedDragging, hash, "RayBasedDragging"sv);
+    applyBoolean(mouse.focusZooming, hash, "FocusZooming"sv);
+}
+
+
+void
+applyRenderDetails(CelestiaConfig::RenderDetails& renderDetails, const Hash& hash)
+{
+    applyNumber(renderDetails.orbitWindowEnd, hash, "OrbitWindowEnd"sv);
+    applyNumber(renderDetails.orbitPeriodsShown, hash, "OrbitPeriodsShown"sv);
+    applyNumber(renderDetails.linearFadeFraction, hash, "LinearFadeFraction"sv);
+    applyNumber(renderDetails.faintestVisible, hash, "FaintestVisibleMagnitude"sv);
+    applyNumber(renderDetails.shadowTextureSize, hash, "ShadowTextureSize"sv);
+    applyNumber(renderDetails.eclipseTextureSize, hash, "EclipseTextureSize"sv);
+    applyNumber(renderDetails.orbitPathSamplePoints, hash, "OrbitPathSamplePoints"sv);
+    applyNumber(renderDetails.aaSamples, hash, "AntialiasingSamples"sv);
+    applyNumber(renderDetails.SolarSystemMaxDistance, hash, "SolarSystemMaxDistance"sv);
+    renderDetails.SolarSystemMaxDistance = std::clamp(renderDetails.SolarSystemMaxDistance, 1.0f, 10.0f);
+    applyNumber(renderDetails.ShadowMapSize, hash, "ShadowMapSize"sv);
+    applyStringArray(renderDetails.ignoreGLExtensions, hash, "IgnoreGLExtensions"sv);
+}
+
+
+void
+applyStarTextures(StarDetails::StarTextureSet& starTextures, const Hash& hash, std::string_view key)
+{
+    const Value* starTexValue = hash.getValue(key);
+    if (starTexValue == nullptr)
+        return;
+
+    const Hash* starTexTable = starTexValue->getHash();
+    if (starTexTable == nullptr)
+    {
+        GetLogger()->error("{} must be a property list.\n", key);
+        return;
+    }
+
+    applyTexture(starTextures.starTex[StellarClass::Spectral_O], *starTexTable, "O"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_B], *starTexTable, "B"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_A], *starTexTable, "A"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_F], *starTexTable, "F"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_G], *starTexTable, "G"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_K], *starTexTable, "K"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_M], *starTexTable, "M"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_R], *starTexTable, "R"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_S], *starTexTable, "S"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_N], *starTexTable, "N"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_WC], *starTexTable, "WC"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_WN], *starTexTable, "WN"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_WO], *starTexTable, "WO"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_Unknown], *starTexTable, "Unknown"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_L], *starTexTable, "L"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_T], *starTexTable, "T"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_Y], *starTexTable, "Y"sv);
+    applyTexture(starTextures.starTex[StellarClass::Spectral_C], *starTexTable, "C"sv);
+    // One texture for all white dwarf types; not sure if this needs to be
+    // changed. White dwarfs vary widely in temperature, so texture choice
+    // should probably be based on that instead of spectral type.
+    applyTexture(starTextures.starTex[StellarClass::Spectral_D], *starTexTable, "WD"sv);
+    applyTexture(starTextures.neutronStarTex, *starTexTable, "NeutronStar"sv);
+    applyTexture(starTextures.defaultTex, *starTexTable, "Default"sv);
+}
+
+} // end unnamed namespace
+
+
+bool ReadCelestiaConfig(const fs::path& filename, CelestiaConfig& config)
+{
+    std::ifstream configFile(filename);
     if (!configFile.good())
     {
-        DPRINTF(LOG_LEVEL_ERROR, "Error opening config file '%s'.\n", filename);
-        return config;
+        GetLogger()->error("Error opening config file '{}'.\n", filename);
+        return false;
     }
 
     Tokenizer tokenizer(&configFile);
     Parser parser(&tokenizer);
 
-    if (tokenizer.nextToken() != Tokenizer::TokenName)
+    tokenizer.nextToken();
+    if (auto tokenValue = tokenizer.getNameValue(); tokenValue != "Configuration")
     {
-        DPRINTF(LOG_LEVEL_ERROR, "%s:%d 'Configuration' expected.\n", filename,
-                tokenizer.getLineNumber());
-        return config;
+        GetLogger()->error("{}:{} 'Configuration' expected.\n", filename,
+                           tokenizer.getLineNumber());
+        return false;
     }
 
-    if (tokenizer.getStringValue() != "Configuration")
+    Value configParamsValue = parser.readValue();
+    const Hash* configParams = configParamsValue.getHash();
+    if (configParams == nullptr)
     {
-        DPRINTF(LOG_LEVEL_ERROR, "%s:%d 'Configuration' expected.\n", filename,
-                tokenizer.getLineNumber());
-        return config;
+        GetLogger()->error("{}: Bad configuration file.\n", filename);
+        return false;
     }
 
-    Value* configParamsValue = parser.readValue();
-    if (configParamsValue == nullptr || configParamsValue->getType() != Value::HashType)
-    {
-        DPRINTF(LOG_LEVEL_ERROR, "%s: Bad configuration file.\n", filename);
-        return config;
-    }
+    applyPaths(config.paths, *configParams);
+    applyFonts(config.fonts, *configParams);
+    applyMouse(config.mouse, *configParams);
+    applyRenderDetails(config.renderDetails, *configParams);
+    applyStarTextures(config.starTextures, *configParams, "StarTextures"sv);
 
-    Hash* configParams = configParamsValue->getHash();
+    applyString(config.projectionMode, *configParams, "ProjectionMode"sv);
+    applyString(config.viewportEffect, *configParams, "ViewportEffect"sv);
+    applyString(config.x264EncoderOptions, *configParams, "X264EncoderOptions"sv);
+    applyString(config.ffvhEncoderOptions, *configParams, "FFVHEncoderOptions"sv);
+    applyString(config.measurementSystem, *configParams, "MeasurementSystem"sv);
+    applyString(config.temperatureScale, *configParams, "TemperatureScale"sv);
+    applyString(config.layoutDirection, *configParams, "LayoutDirection"sv);
+    applyString(config.scriptSystemAccessPolicy, *configParams, "ScriptSystemAccessPolicy"sv);
 
-    if (config == nullptr)
-        config = new CelestiaConfig();
+    applyNumber(config.consoleLogRows, *configParams, "LogSize"sv);
 
 #ifdef CELX
-    config->configParams = configParams;
-    configParams->getPath("LuaHook", config->luaHook);
+    // Move the value into the config object to retain ownership of the hash
+    config.configParams = std::move(configParamsValue);
 #endif
 
-    config->faintestVisible = 6.0f;
-    configParams->getNumber("FaintestVisibleMagnitude", config->faintestVisible);
-    configParams->getPath("FavoritesFile", config->favoritesFile);
-    configParams->getPath("DestinationFile", config->destinationsFile);
-    configParams->getPath("InitScript", config->initScriptFile);
-    configParams->getPath("DemoScript", config->demoScriptFile);
-    configParams->getPath("AsterismsFile", config->asterismsFile);
-    configParams->getPath("BoundariesFile", config->boundariesFile);
-    configParams->getPath("StarDatabase", config->starDatabaseFile);
-    configParams->getPath("StarNameDatabase", config->starNamesFile);
-    configParams->getPath("HDCrossIndex", config->HDCrossIndexFile);
-    configParams->getPath("SAOCrossIndex", config->SAOCrossIndexFile);
-    configParams->getPath("GlieseCrossIndex", config->GlieseCrossIndexFile);
-    configParams->getString("Font", config->mainFont);
-    configParams->getString("LabelFont", config->labelFont);
-    configParams->getString("TitleFont", config->titleFont);
-    configParams->getPath("LogoTexture", config->logoTextureFile);
-    configParams->getString("Cursor", config->cursor);
-    configParams->getString("ProjectionMode", config->projectionMode);
-    configParams->getString("ViewportEffect", config->viewportEffect);
-    configParams->getString("WarpMeshFile", config->warpMeshFile);
-    configParams->getString("X264EncoderOptions", config->x264EncoderOptions);
-    configParams->getString("FFVHEncoderOptions", config->ffvhEncoderOptions);
-
-    float maxDist = 1.0;
-    configParams->getNumber("SolarSystemMaxDistance", maxDist);
-    config->SolarSystemMaxDistance = min(max(maxDist, 1.0f), 10.0f);
-
-    config->ShadowMapSize = getUint(configParams, "ShadowMapSize", 0);
-
-    double aaSamples = 1;
-    configParams->getNumber("AntialiasingSamples", aaSamples);
-    config->aaSamples = (unsigned int) aaSamples;
-
-    config->hdr = false;
-    configParams->getBoolean("HighDynamicRange", config->hdr);
-
-    config->rotateAcceleration = 120.0f;
-    configParams->getNumber("RotateAcceleration", config->rotateAcceleration);
-    config->mouseRotationSensitivity = 1.0f;
-    configParams->getNumber("MouseRotationSensitivity", config->mouseRotationSensitivity);
-    config->reverseMouseWheel = false;
-    configParams->getBoolean("ReverseMouseWheel", config->reverseMouseWheel);
-    configParams->getPath("ScriptScreenshotDirectory", config->scriptScreenshotDirectory);
-    config->scriptSystemAccessPolicy = "ask";
-    configParams->getString("ScriptSystemAccessPolicy", config->scriptSystemAccessPolicy);
-
-    config->orbitWindowEnd = 0.5f;
-    configParams->getNumber("OrbitWindowEnd", config->orbitWindowEnd);
-    config->orbitPeriodsShown = 1.0f;
-    configParams->getNumber("OrbitPeriodsShown", config->orbitPeriodsShown);
-    config->linearFadeFraction = 0.0f;
-    configParams->getNumber("LinearFadeFraction", config->linearFadeFraction);
-
-    config->orbitPathSamplePoints = getUint(configParams, "OrbitPathSamplePoints", 100);
-    config->shadowTextureSize = getUint(configParams, "ShadowTextureSize", 256);
-    config->eclipseTextureSize = getUint(configParams, "EclipseTextureSize", 128);
-
-    config->consoleLogRows = getUint(configParams, "LogSize", 200);
-
-    Value* solarSystemsVal = configParams->getValue("SolarSystemCatalogs");
-    if (solarSystemsVal != nullptr)
-    {
-        if (solarSystemsVal->getType() != Value::ArrayType)
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: SolarSystemCatalogs must be an array.\n", filename);
-        }
-        else
-        {
-            Array* solarSystems = solarSystemsVal->getArray();
-            // assert(solarSystems != nullptr);
-
-            for (const auto catalogNameVal : *solarSystems)
-            {
-                // assert(catalogNameVal != nullptr);
-                if (catalogNameVal->getType() == Value::StringType)
-                {
-                    config->solarSystemFiles.push_back(PathExp(catalogNameVal->getString()));
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: Solar system catalog name must be a string.\n", filename);
-                }
-            }
-        }
-    }
-
-    Value* starCatalogsVal = configParams->getValue("StarCatalogs");
-    if (starCatalogsVal != nullptr)
-    {
-        if (starCatalogsVal->getType() != Value::ArrayType)
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: StarCatalogs must be an array.\n", filename);
-        }
-        else
-        {
-            Array* starCatalogs = starCatalogsVal->getArray();
-            assert(starCatalogs != nullptr);
-
-            for (const auto catalogNameVal : *starCatalogs)
-            {
-                assert(catalogNameVal != nullptr);
-
-                if (catalogNameVal->getType() == Value::StringType)
-                {
-                    config->starCatalogFiles.push_back(PathExp(catalogNameVal->getString()));
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: Star catalog name must be a string.\n", filename);
-                }
-            }
-        }
-    }
-
-    Value* dsoCatalogsVal = configParams->getValue("DeepSkyCatalogs");
-    if (dsoCatalogsVal != nullptr)
-    {
-        if (dsoCatalogsVal->getType() != Value::ArrayType)
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: DeepSkyCatalogs must be an array.\n", filename);
-        }
-        else
-        {
-            Array* dsoCatalogs = dsoCatalogsVal->getArray();
-            assert(dsoCatalogs != nullptr);
-
-            for (const auto catalogNameVal : *dsoCatalogs)
-            {
-                assert(catalogNameVal != nullptr);
-
-                if (catalogNameVal->getType() == Value::StringType)
-                {
-                    config->dsoCatalogFiles.push_back(PathExp(catalogNameVal->getString()));
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: DeepSky catalog name must be a string.\n", filename);
-                }
-            }
-        }
-    }
-
-    Value* extrasDirsVal = configParams->getValue("ExtrasDirectories");
-    if (extrasDirsVal != nullptr)
-    {
-        if (extrasDirsVal->getType() == Value::ArrayType)
-        {
-            Array* extrasDirs = extrasDirsVal->getArray();
-            assert(extrasDirs != nullptr);
-
-            for (const auto dirNameVal : *extrasDirs)
-            {
-                if (dirNameVal->getType() == Value::StringType)
-                {
-                    config->extrasDirs.push_back(PathExp(dirNameVal->getString()));
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: Extras directory name must be a string.\n", filename);
-                }
-            }
-        }
-        else if (extrasDirsVal->getType() == Value::StringType)
-        {
-            config->extrasDirs.push_back(PathExp(extrasDirsVal->getString()));
-        }
-        else
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: ExtrasDirectories must be an array or a string.\n", filename);
-        }
-    }
-
-    Value* skipExtrasVal = configParams->getValue("SkipExtras");
-    if (skipExtrasVal != nullptr)
-    {
-        if (skipExtrasVal->getType() == Value::ArrayType)
-        {
-            Array* skipExtras = skipExtrasVal->getArray();
-            assert(skipExtras != nullptr);
-
-            for (const auto fileNameVal : *skipExtras)
-            {
-                if (fileNameVal->getType() == Value::StringType)
-                {
-                    config->skipExtras.push_back(PathExp(fileNameVal->getString()));
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: Skipped file name must be a string.\n", filename);
-                }
-            }
-        }
-        else if (skipExtrasVal->getType() == Value::StringType)
-        {
-            config->skipExtras.push_back(PathExp(skipExtrasVal->getString()));
-        }
-        else
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: SkipExtras must be an array or a string.\n", filename);
-        }
-    }
-
-    Value* ignoreExtVal = configParams->getValue("IgnoreGLExtensions");
-    if (ignoreExtVal != nullptr)
-    {
-        if (ignoreExtVal->getType() != Value::ArrayType)
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: IgnoreGLExtensions must be an array.\n", filename);
-        }
-        else
-        {
-            Array* ignoreExt = ignoreExtVal->getArray();
-
-            for (const auto extVal : *ignoreExt)
-            {
-                if (extVal->getType() == Value::StringType)
-                {
-                    config->ignoreGLExtensions.push_back(extVal->getString());
-                }
-                else
-                {
-                    DPRINTF(LOG_LEVEL_ERROR, "%s: extension name must be a string.\n", filename);
-                }
-            }
-        }
-    }
-
-    Value* starTexValue = configParams->getValue("StarTextures");
-    if (starTexValue != nullptr)
-    {
-        if (starTexValue->getType() != Value::HashType)
-        {
-            DPRINTF(LOG_LEVEL_ERROR, "%s: StarTextures must be a property list.\n", filename);
-        }
-        else
-        {
-            Hash* starTexTable = starTexValue->getHash();
-            string starTexNames[StellarClass::Spectral_Count];
-            starTexTable->getString("O", starTexNames[StellarClass::Spectral_O]);
-            starTexTable->getString("B", starTexNames[StellarClass::Spectral_B]);
-            starTexTable->getString("A", starTexNames[StellarClass::Spectral_A]);
-            starTexTable->getString("F", starTexNames[StellarClass::Spectral_F]);
-            starTexTable->getString("G", starTexNames[StellarClass::Spectral_G]);
-            starTexTable->getString("K", starTexNames[StellarClass::Spectral_K]);
-            starTexTable->getString("M", starTexNames[StellarClass::Spectral_M]);
-            starTexTable->getString("R", starTexNames[StellarClass::Spectral_R]);
-            starTexTable->getString("S", starTexNames[StellarClass::Spectral_S]);
-            starTexTable->getString("N", starTexNames[StellarClass::Spectral_N]);
-            starTexTable->getString("WC", starTexNames[StellarClass::Spectral_WC]);
-            starTexTable->getString("WN", starTexNames[StellarClass::Spectral_WN]);
-            starTexTable->getString("WO", starTexNames[StellarClass::Spectral_WO]);
-            starTexTable->getString("Unknown", starTexNames[StellarClass::Spectral_Unknown]);
-            starTexTable->getString("L", starTexNames[StellarClass::Spectral_L]);
-            starTexTable->getString("T", starTexNames[StellarClass::Spectral_T]);
-            starTexTable->getString("Y", starTexNames[StellarClass::Spectral_Y]);
-            starTexTable->getString("C", starTexNames[StellarClass::Spectral_C]);
-
-            // One texture for all white dwarf types; not sure if this needs to be
-            // changed. White dwarfs vary widely in temperature, so texture choice
-            // should probably be based on that instead of spectral type.
-            starTexTable->getString("WD", starTexNames[StellarClass::Spectral_D]);
-
-            string neutronStarTexName;
-            if (starTexTable->getString("NeutronStar", neutronStarTexName))
-            {
-                config->starTextures.neutronStarTex.setTexture(neutronStarTexName, "textures");
-            }
-
-            string defaultTexName;
-            if (starTexTable->getString("Default", defaultTexName))
-            {
-                config->starTextures.defaultTex.setTexture(defaultTexName, "textures");
-            }
-
-            for (unsigned int i = 0; i < (unsigned int) StellarClass::Spectral_Count; i++)
-            {
-                if (starTexNames[i] != "")
-                {
-                    config->starTextures.starTex[i].setTexture(starTexNames[i], "textures");
-                }
-            }
-        }
-    }
-
-    // TODO: not cleaning up properly here--we're just saving the hash, not the instance of Value
-    config->params = configParams;
-
-#ifndef CELX
-     delete configParamsValue;
-#endif
-
-    return config;
-}
-
-
-float
-CelestiaConfig::getFloatValue(const string& name)
-{
-    assert(params != nullptr);
-
-    double x = 0.0;
-    params->getNumber(name, x);
-
-    return (float) x;
-}
-
-
-const string
-CelestiaConfig::getStringValue(const string& name)
-{
-    assert(params != nullptr);
-
-    Value* v = params->getValue(name);
-    if (v == nullptr || v->getType() != Value::StringType)
-        return string("");
-
-    return v->getString();
+    return true;
 }

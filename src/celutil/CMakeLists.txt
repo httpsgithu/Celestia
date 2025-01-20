@@ -1,20 +1,29 @@
 set(CELUTIL_SOURCES
-  bigfix.cpp
-  bigfix.h
+  binaryread.h
+  binarywrite.h
   blockarray.h
   bytes.h
   color.cpp
   color.h
-  debug.cpp
-  debug.h
+  dateformatter.cpp
+  dateformatter.h
   filetype.cpp
   filetype.h
+  flag.h
   formatnum.cpp
   formatnum.h
   fsutils.cpp
   fsutils.h
-  #memorypool.cpp
-  #memorypool.h
+  greek.cpp
+  greek.h
+  includeicu.h
+  localeutil.h
+  logger.cpp
+  logger.h
+  ranges.h
+  r128.h
+  r128util.cpp
+  r128util.h
   reshandle.h
   resmanager.h
   stringutils.cpp
@@ -23,12 +32,22 @@ set(CELUTIL_SOURCES
   strnatcmp.h
   timer.cpp
   timer.h
+  tokenizer.cpp
+  tokenizer.h
+  tzutil.cpp
+  tzutil.h
+  uniquedel.h
   utf8.cpp
   utf8.h
-  util.cpp
-  util.h
   watcher.h
 )
+
+if (USE_ICU)
+  list(APPEND CELUTIL_SOURCES
+    unicode.cpp
+    unicode.h
+  )
+endif()
 
 if (WIN32)
   list(APPEND CELUTIL_SOURCES

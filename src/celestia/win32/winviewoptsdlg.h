@@ -9,10 +9,16 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _WINVIEWOPTSDLG_H_
-#define _WINVIEWOPTSDLG_H_
+#pragma once
 
-#include "celestia/celestiacore.h"
+#include <cstdint>
+
+#include <windows.h>
+
+#include <celestia/celestiacore.h>
+
+namespace celestia::win32
+{
 
 class ViewOptionsDialog : public CelestiaWatcher
 {
@@ -28,10 +34,9 @@ class ViewOptionsDialog : public CelestiaWatcher
     CelestiaCore* appCore;
     HWND parent;
     HWND hwnd;
-    uint64_t initialRenderFlags;
+    std::uint64_t initialRenderFlags;
     int initialLabelMode;
     int initialHudDetail;
 };
 
-
-#endif // _WINVIEWOPTSDLG_H_
+} // end namespace celestia::win32

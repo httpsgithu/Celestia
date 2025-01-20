@@ -9,24 +9,26 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _WINTOURGUIDE_H_
-#define _WINTOURGUIDE_H_
+#pragma once
 
-#include "celestia/celestiacore.h"
+#include <windows.h>
 
+class CelestiaCore;
+class Destination;
+
+namespace celestia::win32
+{
 
 class TourGuide
 {
- public:
+public:
     TourGuide(HINSTANCE, HWND, CelestiaCore*);
 
- public:
+public:
     CelestiaCore* appCore;
     Destination* selectedDest;
     HWND parent;
     HWND hwnd;
 };
 
-
-#endif // _TOURGUIDE_H_
-
+} // end namespace celestia::win32

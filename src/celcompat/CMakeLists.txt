@@ -1,8 +1,13 @@
+if(NOT HAVE_FLOAT_CHARCONV)
 set(CELCOMPAT_SOURCES
-  cc.cpp
-  cc.h
-  fs.cpp
-  fs.h
+  charconv_impl.cpp
+  charconv_impl.h
 )
+endif()
 
-add_library(celcompat OBJECT ${CELCOMPAT_SOURCES})
+if(CELCOMPAT_SOURCES)
+  add_library(celcompat OBJECT ${CELCOMPAT_SOURCES})
+  if(NOT MSVC)
+    target_compile_options(celcompat PRIVATE -fmath-errno)
+  endif()
+endif()

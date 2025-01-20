@@ -12,7 +12,41 @@
 
 #include "winuiutils.h"
 
-void SetMouseCursor(LPCTSTR lpCursor)
+namespace celestia::win32
+{
+
+namespace
+{
+
+using GetDpiForWindowFn = UINT STDAPICALLTYPE(HWND hWnd);
+using GetDpiForSystemFn = UINT STDAPICALLTYPE();
+using GetSystemMetricsForDpiFn = UINT STDAPICALLTYPE(int nIndex, UINT dpi);
+
+GetDpiForWindowFn *pfnGetDpiForWindow = nullptr;
+GetDpiForSystemFn *pfnGetDpiForSystem = nullptr;
+GetSystemMetricsForDpiFn *pfnGetSystemMetricsForDpi = nullptr;
+bool dpiFunctionPointersInitialized = false;
+
+void
+InitializeDPIFunctionPointersIfNeeded()
+{
+    if (dpiFunctionPointersInitialized)
+        return;
+
+    HMODULE hUser = GetModuleHandleW(L"user32.dll");
+    if (!hUser)
+        return;
+
+    pfnGetDpiForWindow = reinterpret_cast<GetDpiForWindowFn *>(GetProcAddress(hUser, "GetDpiForWindow"));
+    pfnGetDpiForSystem = reinterpret_cast<GetDpiForSystemFn *>(GetProcAddress(hUser, "GetDpiForSystem"));
+    pfnGetSystemMetricsForDpi = reinterpret_cast<GetSystemMetricsForDpiFn *>(GetProcAddress(hUser, "GetSystemMetricsForDpi"));
+    dpiFunctionPointersInitialized = true;
+}
+
+} // end unnamed namespace
+
+void
+SetMouseCursor(LPCTSTR lpCursor)
 {
     HCURSOR hNewCrsr;
 
@@ -20,36 +54,84 @@ void SetMouseCursor(LPCTSTR lpCursor)
         SetCursor(hNewCrsr);
 }
 
-void CenterWindow(HWND hParent, HWND hWnd)
+void
+CenterWindow(HWND hParent, HWND hWnd)
 {
     //Center window with hWnd handle relative to hParent.
-    if (hParent && hWnd)
+    if (!hParent || !hWnd)
+        return;
+
+    RECT ort;
+    if (!GetWindowRect(hParent, &ort))
+        return;
+
+    RECT irt;
+    if (!GetWindowRect(hWnd, &irt))
+        return;
+
+    int x = ort.left + (ort.right - ort.left - (irt.right - irt.left)) / 2;
+    int y = ort.top + (ort.bottom - ort.top - (irt.bottom - irt.top)) / 2;;
+    SetWindowPos(hWnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
+
+void
+RemoveButtonDefaultStyle(HWND hWnd)
+{
+    SetWindowLong(hWnd, GWL_STYLE,
+                  ::GetWindowLong(hWnd, GWL_STYLE) & ~BS_DEFPUSHBUTTON);
+    InvalidateRect(hWnd, nullptr, TRUE);
+}
+
+void
+AddButtonDefaultStyle(HWND hWnd)
+{
+    SetWindowLong(hWnd, GWL_STYLE,
+                  ::GetWindowLong(hWnd, GWL_STYLE) | BS_DEFPUSHBUTTON);
+    InvalidateRect(hWnd, nullptr, TRUE);
+}
+
+UINT
+GetBaseDPI()
+{
+    return 96;
+}
+
+UINT
+GetDPIForWindow(HWND hWnd)
+{
+    InitializeDPIFunctionPointersIfNeeded();
+    if (hWnd && pfnGetDpiForWindow)
+        return pfnGetDpiForWindow(hWnd);
+    if (pfnGetDpiForSystem)
+        return pfnGetDpiForSystem();
+
+    if (HDC hDC = GetDC(hWnd); hDC)
     {
-        RECT ort, irt;
-        if (GetWindowRect(hParent, &ort))
-        {
-            if (GetWindowRect(hWnd, &irt))
-            {
-                int x, y;
-
-                x = ort.left + (ort.right - ort.left - (irt.right - irt.left)) / 2;
-                y = ort.top + (ort.bottom - ort.top - (irt.bottom - irt.top)) / 2;;
-                SetWindowPos(hWnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-            }
-        }
+        auto dpi = GetDeviceCaps(hDC, LOGPIXELSX);
+        ReleaseDC(hWnd, hDC);
+        return dpi;
     }
+
+    return GetBaseDPI();
 }
 
-void RemoveButtonDefaultStyle(HWND hWnd)
+int
+DpToPixels(int dp, HWND hWnd)
 {
-    SetWindowLong(hWnd, GWL_STYLE,
-        ::GetWindowLong(hWnd, GWL_STYLE) & ~BS_DEFPUSHBUTTON);
-    InvalidateRect(hWnd, nullptr, TRUE);
+    return dp * GetDPIForWindow(hWnd) / GetBaseDPI();
 }
 
-void AddButtonDefaultStyle(HWND hWnd)
+int
+GetSystemMetricsForWindow(int index, HWND hWnd)
 {
-    SetWindowLong(hWnd, GWL_STYLE,
-        ::GetWindowLong(hWnd, GWL_STYLE) | BS_DEFPUSHBUTTON);
-    InvalidateRect(hWnd, nullptr, TRUE);
+    InitializeDPIFunctionPointersIfNeeded();
+    auto dpi = GetDPIForWindow(hWnd);
+    if (pfnGetSystemMetricsForDpi)
+    {
+        return pfnGetSystemMetricsForDpi(index, dpi);
+    }
+    auto systemDpi = GetDPIForWindow(nullptr);
+    return GetSystemMetrics(index) * dpi / systemDpi;
+}
+
 }

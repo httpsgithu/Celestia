@@ -1,4 +1,5 @@
 // wineclipses.h by Kendrix <kendrix@wanadoo.fr>
+// modified by Celestia Development Team
 //
 // Copyright (C) 2001, Chris Laurel <claurel@shatters.net>
 //
@@ -9,30 +10,55 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _WINECLIPSES_H_
-#define _WINECLIPSES_H_
+#pragma once
 
+#include <string>
 #include <vector>
 
-#include "celestia/celestiacore.h"
+#include <celestia/eclipsefinder.h>
+#include <celutil/array_view.h>
 
+#include <windows.h>
+
+#include "tstring.h"
+
+class Body;
+class CelestiaCore;
+
+namespace celestia::win32
+{
 
 class EclipseFinderDialog
 {
- public:
-    EclipseFinderDialog(HINSTANCE, HWND, CelestiaCore*);
+public:
+    enum class TargetBody
+    {
+        Earth,
+        Jupiter,
+        Saturn,
+        Uranus,
+        Neptune,
+        Pluto,
+        Count_,
+    };
 
- public:
+    EclipseFinderDialog(HINSTANCE, HWND, CelestiaCore*);
+    ~EclipseFinderDialog();
+
     CelestiaCore* appCore;
     HWND parent;
     HWND hwnd;
 
-    std::string strPlaneteToFindOn;
+    std::vector<Eclipse> eclipseList;
+    util::array_view<tstring> monthNames;
+    TargetBody targetBody;
     SYSTEMTIME fromTime, toTime;
     double TimetoSet_;
     Body* BodytoSet_;
-    int type;
+    Eclipse::Type type;
+
+    int sortColumn{ -1 };
+    bool sortColumnReverse{ false };
 };
 
-#endif // _WINECLIPSES_H_
-
+} // end namespace celestia::win32

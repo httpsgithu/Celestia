@@ -10,38 +10,16 @@
  *  $Id: dialog-goto.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_DIALOG_GOTO_H
-#define GTK_DIALOG_GOTO_H
+#pragma once
 
 #include <gtk/gtk.h>
 
 #include "common.h"
 
+namespace celestia::gtk
+{
 
 /* Entry Function */
 void dialogGotoObject(AppData* app);
 
-
-/* Local Data Structures */
-typedef struct _gotoObjectData gotoObjectData;
-struct _gotoObjectData {
-    AppData* app;
-
-    GtkWidget* dialog;
-    GtkWidget* nameEntry;
-    GtkWidget* latEntry;
-    GtkWidget* longEntry;
-    GtkWidget* distEntry;
-
-    int units;
-};
-
-static const char * const unitLabels[] =
-{
-    "km",
-    "radii",
-    "au",
-    NULL
-};
-
-#endif /* GTK_DIALOG_GOTO_H */
+} // end namespace celestia::gtk

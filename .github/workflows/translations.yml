@@ -1,0 +1,29 @@
+name: Process translations
+
+on:
+  push:
+    branches: [ master ]
+    paths: [ po/**, .github/workflows/translations.yml ]
+  pull_request:
+    branches: [ master ]
+    paths: [ po/**, .github/workflows/translations.yml ]
+
+jobs:
+  gettext:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [ ubuntu-latest ]
+    runs-on: ubuntu-latest
+    steps:
+    - name: 'Install dependencies'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gettext
+
+    - name: 'Checkout source code'
+      uses: actions/checkout@v4
+
+    - name: 'Validate translations'
+      working-directory: ${{github.workspace}}/po
+      run: for i in *.po; do msgfmt --statistics --verbose $i; done

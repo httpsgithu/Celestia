@@ -8,43 +8,44 @@
 // of the License, or (at your option) any later version.
 
 #include "rotationmanager.h"
-#include <config.h>
+
 #include <celephem/samporient.h>
-#include <celutil/debug.h>
-#include <iostream>
-#include <fstream>
+#include <celutil/logger.h>
 
-using namespace std;
+using celestia::util::GetLogger;
 
-
-static RotationModelManager* rotationModelManager = nullptr;
-
-
-RotationModelManager* GetRotationModelManager()
+namespace celestia::engine
 {
-    if (rotationModelManager == nullptr)
-        rotationModelManager = new RotationModelManager("data");
-    return rotationModelManager;
-}
 
-
-fs::path RotationModelInfo::resolve(const fs::path& baseDir)
+std::shared_ptr<const ephem::RotationModel>
+RotationModelManager::find(const fs::path& source,
+                           const fs::path& path)
 {
-    if (!path.empty())
+    auto filename = path.empty()
+        ? "data" / source
+        : path / "data" / source;
+
+    auto it = rotationModels.try_emplace(filename).first;
+    if (auto cachedModel = it->second.lock(); cachedModel != nullptr)
+        return cachedModel;
+
+    GetLogger()->verbose("Loading rotation model: {}\n", filename);
+    auto model = ephem::LoadSampledOrientation(filename);
+    if (model == nullptr)
     {
-        fs::path filename = path / "data" / source;
-        ifstream in(filename.string());
-        if (in.good())
-            return filename;
+        rotationModels.erase(it);
+        return nullptr;
     }
 
-    return baseDir / source;
+    it->second = model;
+    return model;
 }
 
-
-RotationModel* RotationModelInfo::load(const fs::path& filename)
+RotationModelManager*
+GetRotationModelManager()
 {
-    DPRINTF(LOG_LEVEL_INFO, "Loading rotation model: %s\n", filename);
-
-    return LoadSampledOrientation(filename);
+    static RotationModelManager* const manager = std::make_unique<RotationModelManager>().release(); //NOSONAR
+    return manager;
 }
+
+} // end namespace celestia::engine

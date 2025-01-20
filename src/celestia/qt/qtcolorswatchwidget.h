@@ -10,11 +10,16 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTCOLORSWATCHWIDGET_H_
-#define _QTCOLORSWATCHWIDGET_H_
+#pragma once
 
-#include <QLabel>
 #include <QColor>
+#include <QLabel>
+
+class QMouseEvent;
+class QWidget;
+
+namespace celestia::qt
+{
 
 class ColorSwatchWidget : public QLabel
 {
@@ -34,4 +39,4 @@ Q_OBJECT
     QColor m_color;
 };
 
-#endif // _QTCOLORSWATCHWIDGET_H_
+} // end namespace celestia::qt

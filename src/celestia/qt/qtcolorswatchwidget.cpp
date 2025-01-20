@@ -11,8 +11,12 @@
 // of the License, or (at your option) any later version.
 
 #include "qtcolorswatchwidget.h"
-#include <QColorDialog>
 
+#include <QColorDialog>
+#include <QPalette>
+
+namespace celestia::qt
+{
 
 ColorSwatchWidget::ColorSwatchWidget(const QColor& c, QWidget* /*parent*/) :
     QLabel(nullptr),
@@ -22,24 +26,26 @@ ColorSwatchWidget::ColorSwatchWidget(const QColor& c, QWidget* /*parent*/) :
     setColor(m_color);
 }
 
-
-QColor ColorSwatchWidget::color() const
+QColor
+ColorSwatchWidget::color() const
 {
     return m_color;
 }
 
-
-void ColorSwatchWidget::setColor(QColor c)
+void
+ColorSwatchWidget::setColor(QColor c)
 {
     m_color = c;
     setPalette(QPalette(m_color));
     setAutoFillBackground(true);
 }
 
-
-void ColorSwatchWidget::mouseReleaseEvent(QMouseEvent* /*unused*/)
+void
+ColorSwatchWidget::mouseReleaseEvent(QMouseEvent* /*unused*/)
 {
     QColor c = QColorDialog::getColor(m_color, this);
     if (c.isValid())
         setColor(c);
 }
+
+} // end namespace celestia::qt

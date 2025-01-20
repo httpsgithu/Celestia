@@ -10,6 +10,9 @@
  *  $Id: dialog-solar.cpp,v 1.2 2005-12-13 06:19:57 suwalski Exp $
  */
 
+#include <array>
+#include <cstdio>
+
 #include <gtk/gtk.h>
 
 #include <celengine/body.h>
@@ -23,37 +26,175 @@
 #include "actions.h"
 #include "common.h"
 
+namespace celestia::gtk
+{
 
-/* Declarations: Callbacks */
-static void treeSolarSelect(GtkTreeSelection* sel, AppData* app);
+namespace
+{
 
-/* Declarations: Helpers */
-static void addPlanetarySystemToTree(const PlanetarySystem* sys,
-                                     GtkTreeStore* solarTreeStore,
-                                     GtkTreeIter* parent);
-static void loadNearestStarSystem(AppData* data, GtkWidget* solarTree,
-                                  GtkTreeStore* solarTreeStore);
+/* Local Data */
+constexpr std::array ssTitles
+{
+    "Name",
+    "Type"
+};
 
+/* CALLBACK: When Object is selected in Solar System Browser */
+void
+treeSolarSelect(GtkTreeSelection* sel, AppData* app)
+{
+    gpointer item;
+    SelectionType type;
+
+    GValue value = { 0, {{0}} }; /* Initialize empty GValue */
+    GtkTreeIter iter;
+    GtkTreeModel* model;
+
+    gtk_tree_selection_get_selected(sel, &model, &iter);
+
+    /* Retrieve the item (Body/Star) */
+    gtk_tree_model_get_value(model, &iter, 2, &value);
+    item = g_value_get_pointer(&value);
+    g_value_unset(&value);
+
+    /* Retrieve if isStar */
+    gtk_tree_model_get_value(model, &iter, 3, &value);
+    type = static_cast<SelectionType>(g_value_get_int(&value));
+    g_value_unset(&value);
+
+    if (type == SelectionType::Star)
+        app->simulation->setSelection(Selection((Star *)item));
+    else if (type == SelectionType::Body)
+        app->simulation->setSelection(Selection((Body *)item));
+    else
+        g_warning("Unexpected selection type selected.");
+}
+
+
+/* HELPER: Recursively populate GtkTreeView with objects in PlanetarySystem */
+void
+addPlanetarySystemToTree(const PlanetarySystem* sys, GtkTreeStore* solarTreeStore, GtkTreeIter* parent)
+{
+    for (int i = 0; i < sys->getSystemSize(); i++)
+    {
+        const Body* world = sys->getBody(i);
+        const char* name = g_strdup(world->getName().c_str());
+
+        const char* type = "-";
+        switch(world->getClassification())
+        {
+            case BodyClassification::Planet:
+                type = "Planet";
+                break;
+            case BodyClassification::DwarfPlanet:
+                type = "Dwarf Planet";
+                break;
+            case BodyClassification::Moon:
+                type = "Moon";
+                break;
+            case BodyClassification::MinorMoon:
+                type = "Minor Moon";
+                break;
+            case BodyClassification::Asteroid:
+                type = "Asteroid";
+                break;
+            case BodyClassification::Comet:
+                type = "Comet";
+                break;
+            case BodyClassification::Spacecraft:
+                type = "Spacecraft";
+                break;
+            case BodyClassification::Unknown:
+            default:
+                break;
+        }
+
+        const PlanetarySystem* satellites = world->getSatellites();
+
+        /* Add child */
+        GtkTreeIter child;
+        gtk_tree_store_append(solarTreeStore, &child, parent);
+        gtk_tree_store_set(solarTreeStore, &child,
+                           0, name,
+                           1, type,
+                           2, (gpointer)world,
+                           3, SelectionType::Body, /* not Star */
+                           -1);
+
+        /* Recurse */
+        if (satellites != nullptr)
+            addPlanetarySystemToTree(satellites, solarTreeStore, &child);
+    }
+}
+
+/* HELPER: Retrieves closest system and calls addPlanetarySystemToTree to
+ *         populate. */
+void
+loadNearestStarSystem(AppData* app, GtkWidget* solarTree, GtkTreeStore* solarTreeStore)
+{
+    const char* name;
+    char type[30];
+
+    const Star* nearestStar;
+
+    const SolarSystem* solarSys = app->simulation->getNearestSolarSystem();
+    StarDatabase *stardb = app->simulation->getUniverse()->getStarCatalog();
+    g_assert(stardb);
+
+    GtkTreeIter top;
+    gtk_tree_store_clear(solarTreeStore);
+    gtk_tree_store_append(solarTreeStore, &top, nullptr);
+
+    if (solarSys != nullptr)
+    {
+        nearestStar = solarSys->getStar();
+
+        name = g_strdup(stardb->getStarName(*nearestStar).c_str());
+
+        std::sprintf(type, "%s Star", nearestStar->getSpectralType());
+
+        /* Set up the top-level node. */
+        gtk_tree_store_set(solarTreeStore, &top,
+                           0, name,
+                           1, &type,
+                           2, (gpointer)nearestStar,
+                           3, SelectionType::Star, /* Is Star */
+                           -1);
+
+        const PlanetarySystem* planets = solarSys->getPlanets();
+        if (planets != nullptr)
+            addPlanetarySystemToTree(planets, solarTreeStore, &top);
+
+        /* Open up the top node */
+        GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(solarTreeStore), &top);
+        gtk_tree_view_expand_row(GTK_TREE_VIEW(solarTree), path, FALSE);
+    }
+    else
+        gtk_tree_store_set(solarTreeStore, &top, 0, "No Planetary Bodies", -1);
+}
+
+} // end unnamed namespace
 
 /* ENTRY: Navigation -> Solar System Browser... */
-void dialogSolarBrowser(AppData* app)
+void
+dialogSolarBrowser(AppData* app)
 {
-    GtkWidget *solarTree = NULL;
-    GtkTreeStore *solarTreeStore = NULL;
+    GtkWidget *solarTree = nullptr;
+    GtkTreeStore *solarTreeStore = nullptr;
 
     GtkWidget *browser = gtk_dialog_new_with_buttons("Solar System Browser",
                                                      GTK_WINDOW(app->mainWindow),
                                                      GTK_DIALOG_DESTROY_WITH_PARENT,
                                                      GTK_STOCK_CLOSE,
                                                      GTK_RESPONSE_CLOSE,
-                                                     NULL);
-    app->simulation->setSelection(Selection((Star *) NULL));
+                                                     nullptr);
+    app->simulation->setSelection(Selection((Star *) nullptr));
 
     /* Solar System Browser */
     GtkWidget *mainbox = gtk_dialog_get_content_area(GTK_DIALOG(browser));
     gtk_container_set_border_width(GTK_CONTAINER(mainbox), CELSPACING);
 
-    GtkWidget *scrolled_win = gtk_scrolled_window_new(NULL, NULL);
+    GtkWidget *scrolled_win = gtk_scrolled_window_new(nullptr, nullptr);
 
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_win),
                                    GTK_POLICY_AUTOMATIC,
@@ -71,9 +212,10 @@ void dialogSolarBrowser(AppData* app)
     GtkCellRenderer *renderer;
     GtkTreeViewColumn *column;
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++)
+    {
         renderer = gtk_cell_renderer_text_new();
-        column = gtk_tree_view_column_new_with_attributes(ssTitles[i], renderer, "text", i, NULL);
+        column = gtk_tree_view_column_new_with_attributes(ssTitles[i], renderer, "text", i, nullptr);
         gtk_tree_view_append_column(GTK_TREE_VIEW(solarTree), column);
         gtk_tree_view_column_set_min_width(column, 200);
     }
@@ -97,135 +239,4 @@ void dialogSolarBrowser(AppData* app)
     gtk_widget_show_all(browser);
 }
 
-
-/* CALLBACK: When Object is selected in Solar System Browser */
-static void treeSolarSelect(GtkTreeSelection* sel, AppData* app)
-{
-    gpointer item;
-    gint type;
-
-    GValue value = { 0, {{0}} }; /* Initialize empty GValue */
-    GtkTreeIter iter;
-    GtkTreeModel* model;
-
-    gtk_tree_selection_get_selected(sel, &model, &iter);
-
-    /* Retrieve the item (Body/Star) */
-    gtk_tree_model_get_value(model, &iter, 2, &value);
-    item = g_value_get_pointer(&value);
-    g_value_unset(&value);
-
-    /* Retrieve if isStar */
-    gtk_tree_model_get_value(model, &iter, 3, &value);
-    type = g_value_get_int(&value);
-    g_value_unset(&value);
-
-    if (type == Selection::Type_Star)
-        app->simulation->setSelection(Selection((Star *)item));
-    else if (type == Selection::Type_Body)
-        app->simulation->setSelection(Selection((Body *)item));
-    else
-        g_warning("Unexpected selection type selected.");
-}
-
-
-/* HELPER: Recursively populate GtkTreeView with objects in PlanetarySystem */
-static void addPlanetarySystemToTree(const PlanetarySystem* sys, GtkTreeStore* solarTreeStore, GtkTreeIter* parent)
-{
-    const char *name;
-    const char *type;
-
-    Body* world;
-    const PlanetarySystem* satellites;
-    GtkTreeIter child;
-
-    for (int i = 0; i < sys->getSystemSize(); i++)
-    {
-        world = sys->getBody(i);
-        name = g_strdup(world->getName().c_str());
-
-        switch(world->getClassification())
-        {
-            case Body::Planet:
-                type = "Planet";
-                break;
-            case Body::Moon:
-                type = "Moon";
-                break;
-            case Body::Asteroid:
-                type = "Asteroid";
-                break;
-            case Body::Comet:
-                type = "Comet";
-                break;
-            case Body::Spacecraft:
-                type = "Spacecraft";
-                break;
-            case Body::Unknown:
-            default:
-                type = "-";
-                break;
-        }
-
-        satellites = world->getSatellites();
-
-        /* Add child */
-        gtk_tree_store_append(solarTreeStore, &child, parent);
-        gtk_tree_store_set(solarTreeStore, &child,
-                           0, name,
-                           1, type,
-                           2, (gpointer)world,
-                           3, Selection::Type_Body, /* not Star */
-                           -1);
-
-        /* Recurse */
-        if (satellites != NULL)
-            addPlanetarySystemToTree(satellites, solarTreeStore, &child);
-    }
-}
-
-
-/* HELPER: Retrieves closest system and calls addPlanetarySystemToTree to
- *         populate. */
-static void loadNearestStarSystem(AppData* app, GtkWidget* solarTree, GtkTreeStore* solarTreeStore)
-{
-    const char* name;
-    char type[30];
-
-    const Star* nearestStar;
-
-    const SolarSystem* solarSys = app->simulation->getNearestSolarSystem();
-    StarDatabase *stardb = app->simulation->getUniverse()->getStarCatalog();
-    g_assert(stardb);
-
-    GtkTreeIter top;
-    gtk_tree_store_clear(solarTreeStore);
-    gtk_tree_store_append(solarTreeStore, &top, NULL);
-
-    if (solarSys != NULL)
-    {
-        nearestStar = solarSys->getStar();
-
-        name = g_strdup(stardb->getStarName(*nearestStar).c_str());
-
-        sprintf(type, "%s Star", nearestStar->getSpectralType());
-
-        /* Set up the top-level node. */
-        gtk_tree_store_set(solarTreeStore, &top,
-                           0, name,
-                           1, &type,
-                           2, (gpointer)nearestStar,
-                           3, Selection::Type_Star, /* Is Star */
-                           -1);
-
-        const PlanetarySystem* planets = solarSys->getPlanets();
-        if (planets != NULL)
-            addPlanetarySystemToTree(planets, solarTreeStore, &top);
-
-        /* Open up the top node */
-        GtkTreePath* path = gtk_tree_model_get_path(GTK_TREE_MODEL(solarTreeStore), &top);
-        gtk_tree_view_expand_row(GTK_TREE_VIEW(solarTree), path, FALSE);
-    }
-    else
-        gtk_tree_store_set(solarTreeStore, &top, 0, "No Planetary Bodies", -1);
-}
+} // end namespace celestia::gtk

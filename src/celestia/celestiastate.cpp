@@ -12,7 +12,7 @@
 #include "celestiastate.h"
 #include "url.h"
 
-using namespace celmath;
+namespace math = celestia::math;
 
 
 CelestiaState::CelestiaState(CelestiaCore* appCore) :
@@ -28,10 +28,10 @@ void CelestiaState::captureState()
     auto frame = sim->getFrame();
 
     m_coordSys = frame->getCoordinateSystem();
-    if (m_coordSys != ObserverFrame::Universal)
+    if (m_coordSys != ObserverFrame::CoordinateSystem::Universal)
     {
         m_refBodyName = Url::getEncodedObjectName(frame->getRefObject(), m_appCore);
-        if (m_coordSys == ObserverFrame::PhaseLock)
+        if (m_coordSys == ObserverFrame::CoordinateSystem::PhaseLock)
             m_targetBodyName = Url::getEncodedObjectName(frame->getTargetObject(), m_appCore);
     }
 
@@ -50,7 +50,7 @@ void CelestiaState::captureState()
     m_trackedBodyName = Url::getEncodedObjectName(tracked, m_appCore);
     auto selected = sim->getSelection();
     m_selectedBodyName = Url::getEncodedObjectName(selected, m_appCore);
-    m_fieldOfView = radToDeg(sim->getActiveObserver()->getFOV());
+    m_fieldOfView = math::radToDeg(sim->getActiveObserver()->getFOV());
     m_timeScale = static_cast<float>(sim->getTimeScale());
     m_pauseState = sim->getPauseState();
     m_lightTimeDelay = m_appCore->getLightDelayActive();

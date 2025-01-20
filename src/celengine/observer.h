@@ -4,7 +4,7 @@
 //
 // Because of the vastness of interstellar space, floats and doubles aren't
 // sufficient when we need to represent distances to millimeter accuracy.
-// BigFix is a high precision (128 bit) fixed point type used to represent
+// R128 is a high precision (128 bit) fixed point type used to represent
 // the position of an observer in space.  However, it's not practical to use
 // high-precision numbers for the positions of everything.  To get around
 // this problem, object positions are stored at two different scales--light
@@ -15,21 +15,38 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_OBSERVER_H_
-#define _CELENGINE_OBSERVER_H_
+#pragma once
 
-#include <celmath/mathlib.h>
-#include <celengine/frame.h>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include "shared.h"
 
+#include <celcompat/numbers.h>
+#include "selection.h"
+#include "shared.h"
+#include "univcoord.h"
+
+class ReferenceFrame;
+
+/*! ObserverFrame is a wrapper class for ReferenceFrame which adds some
+ * annotation data. The goal is to place some restrictions on what reference
+ * frame can be set for an observer. General reference frames can be
+ * arbitrarily complex, with multiple levels of nesting. This makes it
+ * difficult to store them in a cel:// URL or display information about
+ * them for the user. The restricted set of reference frames wrapped by
+ * the ObserverFrame class does not suffer from such problems.
+ */
 class ObserverFrame
 {
 public:
     SHARED_TYPES(ObserverFrame)
 
-    enum CoordinateSystem
+    enum class CoordinateSystem
     {
         Universal       = 0,
         Ecliptical      = 1,
@@ -55,20 +72,22 @@ public:
 
     ObserverFrame();
     ObserverFrame(CoordinateSystem cs,
-                  const Selection &_refObject,
-                  const Selection &_targetObj = Selection());
-    ObserverFrame(const ObserverFrame&);
-    ObserverFrame(const ReferenceFrame::SharedConstPtr &f);
+                  const Selection& _refObject,
+                  const Selection& _targetObj = Selection());
+    explicit ObserverFrame(const std::shared_ptr<const ReferenceFrame>& f);
 
-    ~ObserverFrame() = default;
+    ~ObserverFrame();
 
-    ObserverFrame &operator=(const ObserverFrame &f);
+    ObserverFrame(const ObserverFrame&) = default;
+    ObserverFrame& operator=(const ObserverFrame&) = default;
+    ObserverFrame(ObserverFrame&&) noexcept = default;
+    ObserverFrame& operator=(ObserverFrame&&) noexcept = default;
 
     CoordinateSystem getCoordinateSystem() const;
     Selection getRefObject() const;
     Selection getTargetObject() const;
 
-    const ReferenceFrame::SharedConstPtr &getFrame() const;
+    const std::shared_ptr<const ReferenceFrame>& getFrame() const;
 
     UniversalCoord convertFromUniversal(const UniversalCoord &uc, double tjd) const;
     UniversalCoord convertToUniversal(const UniversalCoord &uc, double tjd) const;
@@ -85,29 +104,20 @@ public:
                                       double t);
 
 private:
-    ReferenceFrame::SharedConstPtr createFrame(CoordinateSystem _coordSys,
-                                const Selection &_refObject,
-                                const Selection &_targetObject);
-
-private:
     CoordinateSystem coordSys;
-    ReferenceFrame::SharedConstPtr frame;
+    std::shared_ptr<const ReferenceFrame> frame;
     Selection targetObject;
 };
 
-
-/*! ObserverFrame is a wrapper class for ReferenceFrame which adds some
- * annotation data. The goal is to place some restrictions on what reference
- * frame can be set for an observer. General reference frames can be
- * arbitrarily complex, with multiple levels of nesting. This makes it
- * difficult to store them in a cel:// URL or display information about
- * them for the user. The restricted set of reference frames wrapped by
- * the ObserverFrame class does not suffer from such problems.
- */
 class Observer
 {
 public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    static constexpr std::uint64_t DefaultLocationFilter = ~UINT64_C(0);
+
+    static constexpr const double JourneyDuration    = 5.0;
+    static constexpr const double StartInterpolation = 0.25;
+    static constexpr const double EndInterpolation   = 0.75;
+    static constexpr const double AccelerationTime   = 0.5;
 
     Observer();
     Observer(const Observer &o);
@@ -116,42 +126,47 @@ public:
     Observer &operator=(const Observer &o);
 
     UniversalCoord getPosition() const;
-    void          setPosition(const UniversalCoord&);
-    void          setPosition(const Eigen::Vector3d&);
+    void           setPosition(const UniversalCoord&);
 
     Eigen::Quaterniond getOrientation() const;
     Eigen::Quaternionf getOrientationf() const;
-    void          setOrientation(const Eigen::Quaternionf&);
-    void          setOrientation(const Eigen::Quaterniond&);
+    void               setOrientation(const Eigen::Quaternionf&);
+    void               setOrientation(const Eigen::Quaterniond&);
+
+    Eigen::Matrix3d getOrientationTransform() const;
+    void            setOrientationTransform(const Eigen::Matrix3d&);
 
     Eigen::Vector3d getVelocity() const;
-    void          setVelocity(const Eigen::Vector3d&);
+    void            setVelocity(const Eigen::Vector3d&);
     Eigen::Vector3d getAngularVelocity() const;
-    void          setAngularVelocity(const Eigen::Vector3d&);
+    void            setAngularVelocity(const Eigen::Vector3d&);
 
     float          getFOV() const;
     void           setFOV(float);
 
+    float          getZoom() const;
+    void           setZoom(float);
+    float          getAlternateZoom() const;
+    void           setAlternateZoom(float);
+
     void           update(double dt, double timeScale);
 
-    Eigen::Vector3f getPickRay(float x, float y) const;
-    Eigen::Vector3f getPickRayFisheye(float x, float y) const;
-
-
     void orbit(const Selection&, const Eigen::Quaternionf &q);
+    bool orbit(const Selection&, const Eigen::Vector3f &from, const Eigen::Vector3f &to);
     void rotate(const Eigen::Quaternionf &q);
     void changeOrbitDistance(const Selection&, float d);
+    void scaleOrbitDistance(const Selection&, float scale, const std::optional<Eigen::Vector3f> &focus);
     void setTargetSpeed(float s);
-    float getTargetSpeed();
+    float getTargetSpeed() const;
 
     Selection getTrackedObject() const;
     void setTrackedObject(const Selection&);
 
-    const std::string &getDisplayedSurface() const;
-    void setDisplayedSurface(const std::string&);
+    const std::string& getDisplayedSurface() const;
+    void setDisplayedSurface(std::string_view);
 
-    uint64_t getLocationFilter() const;
-    void setLocationFilter(uint64_t);
+    std::uint64_t getLocationFilter() const;
+    void setLocationFilter(std::uint64_t);
 
     void gotoSelection(const Selection&,
                        double gotoTime,
@@ -161,12 +176,11 @@ public:
                        double gotoTime,
                        double startInter,
                        double endInter,
+                       double accelTime,
                        const Eigen::Vector3f &up,
                        ObserverFrame::CoordinateSystem upFrame);
     void gotoSelectionGC(const Selection&,
                          double gotoTime,
-                         double startInter,
-                         double endInter,
                          const Eigen::Vector3f &up,
                          ObserverFrame::CoordinateSystem upFrame);
     void gotoSelection(const Selection&,
@@ -185,7 +199,7 @@ public:
     void getSelectionLongLat(const Selection&,
                              double &distance,
                              double &longitude,
-                             double &latitude);
+                             double &latitude) const;
     void gotoSelectionGC(const Selection &selection,
                          double gotoTime,
                          double distance,
@@ -214,7 +228,7 @@ public:
     double getRealTime() const;
     void setTime(double);
 
-    enum ObserverMode
+    enum class ObserverMode
     {
         Free                    = 0,
         Travelling              = 1,
@@ -223,7 +237,7 @@ public:
     ObserverMode getMode() const;
     void setMode(ObserverMode);
 
-    enum TrajectoryType
+    enum class TrajectoryType
     {
         Linear        = 0,
         GreatCircle   = 1,
@@ -232,42 +246,35 @@ public:
 
     struct JourneyParams
     {
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-        double duration;
-        double startTime;
+        double duration{ JourneyDuration };
+        double startTime{ 0.0 };
         UniversalCoord from;
         UniversalCoord to;
         Eigen::Quaterniond initialOrientation;
         Eigen::Quaterniond finalOrientation;
-        double startInterpolation; // start of orientation interpolation phase [0-1]
-        double endInterpolation;   // end of orientation interpolation phase [0-1]
-        double expFactor;
-        double accelTime;
+        double startInterpolation{ StartInterpolation }; // start of orientation interpolation phase [0-1]
+        double endInterpolation{ EndInterpolation };   // end of orientation interpolation phase [0-1]
+        double expFactor{ 0.5 };
+        double accelTime{ AccelerationTime };
         Eigen::Quaterniond rotation1; // rotation on the CircularOrbit around centerObject
 
         Selection centerObject;
 
-        TrajectoryType traj;
+        TrajectoryType traj{ TrajectoryType::Linear };
     };
 
     void gotoJourney(const JourneyParams&);
     // void setSimulation(Simulation* _sim) { sim = _sim; };
 
- private:
+private:
     void computeGotoParameters(const Selection &sel,
                                JourneyParams &jparams,
-                               double gotoTime,
-                               double startInter,
-                               double endInter,
                                const Eigen::Vector3d &offset,
                                ObserverFrame::CoordinateSystem offsetFrame,
                                const Eigen::Vector3f &up,
                                ObserverFrame::CoordinateSystem upFrame);
     void computeGotoParametersGC(const Selection &sel,
                                  JourneyParams &jparams,
-                                 double gotoTime,
-                                 double startInter,
-                                 double endInter,
                                  const Eigen::Vector3d &offset,
                                  ObserverFrame::CoordinateSystem offsetFrame,
                                  const Eigen::Vector3f &up,
@@ -275,48 +282,55 @@ public:
                                  const Selection &centerObj);
     void computeCenterParameters(const Selection &sel,
                                  JourneyParams &jparams,
-                                 double centerTime);
+                                 double centerTime) const;
     void computeCenterCOParameters(const Selection &sel,
                                    JourneyParams &jparams,
-                                   double centerTime);
+                                   double centerTime) const;
 
+    void setOriginalOrientation(const Eigen::Quaternionf&);
+    void setOriginalOrientation(const Eigen::Quaterniond&);
     void updateUniversal();
+    void updateOrientation();
+    Eigen::Quaterniond undoTransform(const Eigen::Quaterniond&) const;
     void convertFrameCoordinates(const ObserverFrame::SharedConstPtr &newFrame);
 
- private:
     double              simTime{ 0.0 };
 
     // Position, orientation, and velocity in the observer's reference frame
     UniversalCoord      position{ 0.0, 0.0, 0.0 };
-    Eigen::Quaterniond  orientation{ Eigen::Quaternionf::Identity() };
-    Eigen::Vector3d     velocity{ 0.0, 0.0, 0.0 };
-    Eigen::Vector3d     angularVelocity{ 0.0, 0.0, 0.0 };
+    Eigen::Quaterniond  originalOrientation{ Eigen::Quaterniond::Identity() };
+    Eigen::Quaterniond  transformedOrientation{ Eigen::Quaterniond::Identity() };
+    Eigen::Matrix3d     orientationTransform{ Eigen::Matrix3d::Identity() };
+    Eigen::Vector3d     velocity{ Eigen::Vector3d::Zero() };
+    Eigen::Vector3d     angularVelocity{ Eigen::Vector3d::Zero() };
 
     // Position and orientation in universal coordinates, derived from the
     // equivalent quantities in the observer reference frame.
     UniversalCoord      positionUniv;
-    Eigen::Quaterniond  orientationUniv;
+    Eigen::Quaterniond  originalOrientationUniv;
+    Eigen::Quaterniond  transformedOrientationUniv;
 
     ObserverFrame::SharedConstPtr frame;
 
     double              realTime{ 0.0 };
 
     double          	targetSpeed{ 0.0 };
-    Eigen::Vector3d 	targetVelocity{ 0.0, 0.0, 0.0 };
-    Eigen::Vector3d 	initialVelocity{ 0.0, 0.0, 0.0 };
+    Eigen::Vector3d 	targetVelocity{ Eigen::Vector3d::Zero() };
+    Eigen::Vector3d 	initialVelocity{ Eigen::Vector3d::Zero() };
     double          	beginAccelTime{ 0.0 };
 
-    ObserverMode     	observerMode{ Free };
+    ObserverMode     	observerMode{ ObserverMode::Free };
     JourneyParams    	journey;
     Selection        	trackObject;
 
     Eigen::Quaterniond 	trackingOrientation{ Eigen::Quaternionf::Identity() };   // orientation prior to selecting tracking
 
-    float fov{ (float) (PI / 4.0) };
+    float fov{ static_cast<float>(celestia::numbers::pi / 4.0) };
+    float zoom{ 1.0f };
+    float alternateZoom{ 1.0f };
+
     bool reverseFlag{ false };
 
-    uint64_t locationFilter{ ~0ull };
+    std::uint64_t locationFilter{ DefaultLocationFilter };
     std::string displayedSurface;
 };
-
-#endif // _CELENGINE_OBSERVER_H_

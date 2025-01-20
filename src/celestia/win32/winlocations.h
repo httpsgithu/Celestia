@@ -9,12 +9,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELESTIA_WINLOCATIONS_H_
-#define _CELESTIA_WINLOCATIONS_H_
+#pragma once
+
+#include <cstdint>
 
 #include <windows.h>
 #include <commctrl.h>
-#include "celestia/celestiacore.h"
+
+#include <celestia/celestiacore.h>
+
+namespace celestia::win32
+{
 
 class LocationsDialog : public CelestiaWatcher
 {
@@ -30,9 +35,8 @@ class LocationsDialog : public CelestiaWatcher
     CelestiaCore* appCore;
     HWND parent;
     HWND hwnd;
-    uint64_t initialLocationFlags;
+    std::uint64_t initialLocationFlags;
     float initialFeatureSize;
 };
 
-#endif // _CELESTIA_WINLOCATIONS_H_
-
+} // end namespace celestia::win32

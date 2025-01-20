@@ -8,62 +8,43 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_MODEL_GEOMETRY_H_
-#define _CELENGINE_MODEL_GEOMETRY_H_
+#pragma once
 
-#include "geometry.h"
-#include <celmodel/model.h>
-#include <celutil/resmanager.h>
 #include <memory>
 
+#include <Eigen/Geometry>
 
-class CelestiaTextureResource : public cmod::Material::TextureResource
-{
-public:
-    CelestiaTextureResource(ResourceHandle textureHandle) :
-        m_textureHandle(textureHandle)
-    {
-    }
+#include <celmodel/model.h>
+#include "geometry.h"
 
-    ResourceHandle textureHandle() const
-    {
-        return m_textureHandle;
-    }
-
-    fs::path source() const;
-
-private:
-    ResourceHandle m_textureHandle;
-};
 
 class ModelOpenGLData;
+class RenderContext;
 
 class ModelGeometry : public Geometry
 {
- public:
-    ModelGeometry(std::unique_ptr<cmod::Model>&& model);
-    ~ModelGeometry() = default;
+public:
+    explicit ModelGeometry(std::unique_ptr<cmod::Model>&& model);
+    ~ModelGeometry();
 
     /*! Find the closest intersection between the ray and the
      *  model.  If the ray intersects the model, return true
      *  and set distance; otherwise return false and leave
      *  distance unmodified.
      */
-    virtual bool pick(const celmath::Ray3d& r, double& distance) const;
+    bool pick(const Eigen::ParametrizedLine<double, 3>& r, double& distance) const override;
 
     //! Render the model in the current OpenGL context
-    virtual void render(RenderContext&, double t = 0.0);
+    void render(RenderContext&, double t = 0.0) override;
 
-    virtual bool usesTextureType(cmod::Material::TextureSemantic) const;
-    virtual bool isOpaque() const;
-    virtual bool isNormalized() const;
+    bool usesTextureType(cmod::TextureSemantic) const override;
+    bool isOpaque() const override;
+    bool isNormalized() const override;
 
-    void loadTextures();
+    void loadTextures() override;
 
- private:
+private:
     std::unique_ptr<cmod::Model> m_model;
-    bool m_vbInitialized{ false };
     std::unique_ptr<ModelOpenGLData> m_glData;
+    bool m_vbInitialized{ false };
 };
-
-#endif // !_CELENGINE_MODEL_H_

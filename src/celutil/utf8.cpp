@@ -1,21 +1,27 @@
 // utf8.cpp
 //
 // Copyright (C) 2004, Chris Laurel <claurel@shatters.net>
+//               2018-present, Celestia Development Team
 //
 // This program is free software; you can redistribute it and/or
 // modify it under the terms of the GNU General Public License
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <cctype>
-#include <cstring>
-#include <wchar.h>
-#include <climits>
-#include <fmt/printf.h>
-#include "stringutils.h"
 #include "utf8.h"
 
-uint16_t WGL4_Normalization_00[256] = {
+#include <cassert>
+#include <cwctype>
+
+
+namespace
+{
+
+using WGL4Page = std::array<std::uint16_t, 256>;
+
+// clang-format off
+
+constexpr WGL4Page WGL4_Normalization_00{
     0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
     0x0008, 0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x000e, 0x000f,
     0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
@@ -50,7 +56,7 @@ uint16_t WGL4_Normalization_00[256] = {
     0x00f8, 0x0075, 0x0075, 0x0075, 0x0075, 0x0079, 0x00fe, 0x0079,
 };
 
-uint16_t WGL4_Normalization_01[256] = {
+constexpr WGL4Page WGL4_Normalization_01{
     0x0061, 0x0061, 0x0061, 0x0061, 0x0061, 0x0061, 0x0063, 0x0063,
     0x0063, 0x0063, 0x0063, 0x0063, 0x0063, 0x0063, 0x0064, 0x0064,
     0x0111, 0x0111, 0x0065, 0x0065, 0x0065, 0x0065, 0x0065, 0x0065,
@@ -85,7 +91,7 @@ uint16_t WGL4_Normalization_01[256] = {
     0x01f8, 0x01f9, 0x00e5, 0x00e5, 0x00e6, 0x00e6, 0x00f8, 0x00f8,
 };
 
-uint16_t WGL4_Normalization_02[256] = {
+constexpr WGL4Page WGL4_Normalization_02{
     0x0200, 0x0201, 0x0202, 0x0203, 0x0204, 0x0205, 0x0206, 0x0207,
     0x0208, 0x0209, 0x020a, 0x020b, 0x020c, 0x020d, 0x020e, 0x020f,
     0x0210, 0x0211, 0x0212, 0x0213, 0x0214, 0x0215, 0x0216, 0x0217,
@@ -120,7 +126,7 @@ uint16_t WGL4_Normalization_02[256] = {
     0x02f8, 0x02f9, 0x02fa, 0x02fb, 0x02fc, 0x02fd, 0x02fe, 0x02ff,
 };
 
-uint16_t WGL4_Normalization_03[256] = {
+constexpr WGL4Page WGL4_Normalization_03{
     0x0300, 0x0301, 0x0302, 0x0303, 0x0304, 0x0305, 0x0306, 0x0307,
     0x0308, 0x0309, 0x030a, 0x030b, 0x030c, 0x030d, 0x030e, 0x030f,
     0x0310, 0x0311, 0x0312, 0x0313, 0x0314, 0x0315, 0x0316, 0x0317,
@@ -155,7 +161,7 @@ uint16_t WGL4_Normalization_03[256] = {
     0x03f8, 0x03f9, 0x03fa, 0x03fb, 0x03fc, 0x03fd, 0x03fe, 0x03ff,
 };
 
-uint16_t WGL4_Normalization_04[256] = {
+constexpr WGL4Page WGL4_Normalization_04{
     0x0400, 0x0435, 0x0452, 0x0433, 0x0454, 0x0455, 0x0456, 0x0456,
     0x0458, 0x0459, 0x045a, 0x045b, 0x043a, 0x040d, 0x0443, 0x045f,
     0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
@@ -190,7 +196,7 @@ uint16_t WGL4_Normalization_04[256] = {
     0x04f8, 0x04f9, 0x04fa, 0x04fb, 0x04fc, 0x04fd, 0x04fe, 0x04ff,
 };
 
-uint16_t WGL4_Normalization_1e[256] = {
+constexpr WGL4Page WGL4_Normalization_1e{
     0x1e00, 0x1e01, 0x1e02, 0x1e03, 0x1e04, 0x1e05, 0x1e06, 0x1e07,
     0x1e08, 0x1e09, 0x1e0a, 0x1e0b, 0x1e0c, 0x1e0d, 0x1e0e, 0x1e0f,
     0x1e10, 0x1e11, 0x1e12, 0x1e13, 0x1e14, 0x1e15, 0x1e16, 0x1e17,
@@ -225,7 +231,7 @@ uint16_t WGL4_Normalization_1e[256] = {
     0x1ef8, 0x1ef9, 0x1efa, 0x1efb, 0x1efc, 0x1efd, 0x1efe, 0x1eff,
 };
 
-uint16_t WGL4_Normalization_21[256] = {
+constexpr WGL4Page WGL4_Normalization_21{
     0x2100, 0x2101, 0x2102, 0x2103, 0x2104, 0x2105, 0x2106, 0x2107,
     0x2108, 0x2109, 0x210a, 0x210b, 0x210c, 0x210d, 0x210e, 0x210f,
     0x2110, 0x2111, 0x2112, 0x006c, 0x2114, 0x2115, 0x2116, 0x2117,
@@ -260,17 +266,17 @@ uint16_t WGL4_Normalization_21[256] = {
     0x21f8, 0x21f9, 0x21fa, 0x21fb, 0x21fc, 0x21fd, 0x21fe, 0x21ff,
 };
 
-uint16_t* WGL4NormalizationTables[256] = {
-    WGL4_Normalization_00,
-    WGL4_Normalization_01,
-    WGL4_Normalization_02,
-    WGL4_Normalization_03,
-    WGL4_Normalization_04,
+constexpr std::array<const WGL4Page*, 256> WGL4NormalizationTables{
+    &WGL4_Normalization_00,
+    &WGL4_Normalization_01,
+    &WGL4_Normalization_02,
+    &WGL4_Normalization_03,
+    &WGL4_Normalization_04,
     nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, WGL4_Normalization_1e, nullptr,
-    nullptr, WGL4_Normalization_21, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &WGL4_Normalization_1e, nullptr,
+    nullptr, &WGL4_Normalization_21, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -300,244 +306,123 @@ uint16_t* WGL4NormalizationTables[256] = {
     nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
 };
 
+// clang-format on
 
-//! Decode the UTF-8 characters in string str beginning at position pos.
-//! The decoded character is returned in ch; the return value of the function
-//! is true if a valid UTF-8 sequence was successfully decoded.
-bool UTF8Decode(const std::string& str, int pos, wchar_t& ch)
+inline std::int32_t UTF8Normalize(std::int32_t ch)
 {
-    auto c0 = (unsigned int) str[pos];
-    int charlen = UTF8EncodedSizeFromFirstByte(c0);
+    if (ch < 0 || ch > 0xffff)
+        return ch;
 
-    // Bad UTF-8 character that extends past end of string
-    if (pos + charlen > (int)str.length())
-        return false;
-
-    // TODO: Should check that the bytes of characters after the first are all
-    // of the form 01xxxxxx
-    // TODO: Need to reject overlong encoding sequences
-
-    switch (charlen)
-    {
-    case 1:
-        ch = c0;
-        return true;
-
-    case 2:
-        ch = ((c0 & 0x1f) << 6) | ((unsigned int) str[pos + 1] & 0x3f);
-        return true;
-
-    case 3:
-        ch = ((c0 & 0x0f) << 12) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 6) |
-            ((unsigned int)  str[pos + 2] & 0x3f);
-        return true;
-
-    case 4:
-        ch = ((c0 & 0x07) << 18) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 3] & 0x3f);
-        return true;
-
-    case 5:
-        ch = ((c0 & 0x03) << 24) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 18) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 3] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 4] & 0x3f);
-        return true;
-
-    case 6:
-        ch = ((c0 & 0x01) << 30) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 24) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 18) |
-            (((unsigned int) str[pos + 3] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 4] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 5] & 0x3f);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-
-//! Decode the UTF-8 characters in string str beginning at position pos.
-//! The decoded character is returned in ch; the return value of the function
-//! is true if a valid UTF-8 sequence was successfully decoded.
-bool UTF8Decode(const char* str, int pos, int length, wchar_t& ch)
-{
-    auto c0 = (unsigned int) str[pos];
-    int charlen = UTF8EncodedSizeFromFirstByte(c0);
-
-    // Bad UTF-8 character that extends past end of string
-    if (pos + charlen > length)
-        return false;
-
-    // TODO: Should check that the bytes of characters after the first are all
-    // of the form 01xxxxxx
-    // TODO: Need to reject overlong encoding sequences
-
-    switch (charlen)
-    {
-    case 1:
-        ch = c0;
-        return true;
-
-    case 2:
-        ch = ((c0 & 0x1f) << 6) | ((unsigned int) str[pos + 1] & 0x3f);
-        return true;
-
-    case 3:
-        ch = ((c0 & 0x0f) << 12) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 6) |
-            ((unsigned int)  str[pos + 2] & 0x3f);
-        return true;
-
-    case 4:
-        ch = ((c0 & 0x07) << 18) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 3] & 0x3f);
-        return true;
-
-    case 5:
-        ch = ((c0 & 0x03) << 24) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 18) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 3] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 4] & 0x3f);
-        return true;
-
-    case 6:
-        ch = ((c0 & 0x01) << 30) |
-            (((unsigned int) str[pos + 1] & 0x3f) << 24) |
-            (((unsigned int) str[pos + 2] & 0x3f) << 18) |
-            (((unsigned int) str[pos + 3] & 0x3f) << 12) |
-            (((unsigned int) str[pos + 4] & 0x3f) << 6)  |
-            ((unsigned int)  str[pos + 5] & 0x3f);
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-
-//! UTF-8 encode the Unicode character ch into the string s and return the
-//! encoded length.  There should be space for at least 7 characters in s--up
-//! to six encoded bytes, plus one byte for the terminating null character.
-int UTF8Encode(wchar_t ch, char* s)
-{
-    if (ch < 0x80)
-    {
-        s[0] = (char) ch;
-        s[1] = '\0';
-        return 1;
-    }
-    if (ch < 0x800)
-    {
-        s[0] = (char) (0xc0 | ((ch & 0x7c0) >> 6));
-        s[1] = (char) (0x80 | (ch & 0x3f));
-        s[2] = '\0';
-        return 2;
-    }
-#if WCHAR_MAX > 0xFFFFu
-    if (ch < 0x10000)
-    {
-#endif
-        s[0] = (char) (0xe0 | ((ch & 0xf000) >> 12));
-        s[1] = (char) (0x80 | ((ch & 0x0fc0) >> 6));
-        s[2] = (char) (0x80 | ((ch & 0x003f)));
-        s[3] = '\0';
-        return 3;
-#if WCHAR_MAX > 0xFFFFu
-    }
-    if (ch < 0x200000)
-    {
-        s[0] = (char) (0xf0 | ((ch & 0x1c0000) >> 18));
-        s[1] = (char) (0x80 | ((ch & 0x03f000) >> 12));
-        s[2] = (char) (0x80 | ((ch & 0x000fc0) >>  6));
-        s[3] = (char) (0x80 | ((ch & 0x00003f)));
-        s[4] = '\0';
-        return 4;
-    }
-    if (ch < 0x4000000)
-    {
-        s[0] = (char) (0xf8 | ((ch & 0x3000000) >> 24));
-        s[1] = (char) (0x80 | ((ch & 0x0fc0000) >> 18));
-        s[2] = (char) (0x80 | ((ch & 0x003f000) >> 12));
-        s[3] = (char) (0x80 | ((ch & 0x0000fc0) >>  6));
-        s[4] = (char) (0x80 | ((ch & 0x000003f)));
-        s[5] = '\0';
-        return 5;
-    }
-    else
-    {
-        s[0] = (char) (0xfc | ((ch & 0x40000000) >> 30));
-        s[1] = (char) (0x80 | ((ch & 0x3f000000) >> 24));
-        s[2] = (char) (0x80 | ((ch & 0x00fc0000) >> 18));
-        s[3] = (char) (0x80 | ((ch & 0x0003f000) >> 12));
-        s[4] = (char) (0x80 | ((ch & 0x00000fc0) >>  6));
-        s[5] = (char) (0x80 | ((ch & 0x0000003f)));
-        s[6] = '\0';
-        return 6;
-    }
-#endif
-}
-
-
-//! Return the number of characters encoded by a UTF-8 string
-int UTF8Length(const std::string& s)
-{
-    int len = s.length();
-    int count = 0;
-    for (int i = 0; i < len; i++)
-    {
-        auto c = (unsigned int) ((unsigned char) s[i]);
-        if ((c < 0x80) || (c >= 0xc2 && c <= 0xf4))
-            count++;
-    }
-
-    return count;
-}
-
-
-inline wchar_t UTF8Normalize(wchar_t ch)
-{
-    auto page = (unsigned int) ch >> 8;
+    auto page = static_cast<std::size_t>(ch) >> 8;
     if (page >= 256)
         return ch;
 
-    uint16_t* normTable = WGL4NormalizationTables[page];
+    const WGL4Page* normTable = WGL4NormalizationTables[page];
     if (normTable == nullptr)
         return ch;
 
-    return (wchar_t) normTable[(unsigned int) ch & 0xff];
+    auto index = static_cast<unsigned int>(ch) & 0xff;
+    return static_cast<std::int32_t>((*normTable)[index]);
+}
+
+} // namespace
+
+//! Decode the UTF-8 character at the start of the string str. The decoded
+//! character is returned in ch; the return value of the function is true if
+//! a valid UTF-8 sequence was successfully decoded.
+bool UTF8Decode(std::string_view str, std::int32_t& ch)
+{
+    std::int32_t offset = 0;
+    return UTF8Decode(str, offset, ch);
+}
+
+//! Decode the UTF-8 characters in string str beginning at position pos.
+//! The decoded character is returned in ch; the return value of the function
+//! is true if a valid UTF-8 sequence was successfully decoded. The value of
+//! pos is advanced to the next undecoded byte in the input string.
+bool UTF8Decode(std::string_view str, std::int32_t& pos, std::int32_t& ch)
+{
+    UTF8Validator validator;
+    auto length = static_cast<std::int32_t>(str.size());
+    while (pos < length)
+    {
+        auto result = validator.check(str[pos]);
+        ++pos;
+        if (result >= 0)
+        {
+            ch = result;
+            return true;
+        }
+        if (result != UTF8Validator::PartialSequence)
+            return false;
+    }
+
+    return false;
+}
+
+//! Appends the UTF-8 encoded version of the code point ch to the
+//! destination string
+void UTF8Encode(std::uint32_t ch, std::string& dest)
+{
+    if (ch < 0x80)
+    {
+        dest.push_back(static_cast<char>(ch));
+    }
+    else if (ch < 0x800)
+    {
+        dest.push_back(static_cast<char>(0xc0 | (ch >> 6)));
+        dest.push_back(static_cast<char>(0x80 | (ch & 0x3f)));
+    }
+    else if (ch < 0x10000)
+    {
+        if (ch < 0xd800 || ch >= 0xe000)
+        {
+            dest.push_back(static_cast<char>(0xe0 | (ch >> 12)));
+            dest.push_back(static_cast<char>(0x80 | ((ch & 0xfff) >> 6)));
+            dest.push_back(static_cast<char>(0x80 | (ch & 0x3f)));
+        }
+        else
+        {
+            // disallow surrogates
+            dest.append(UTF8_REPLACEMENT_CHAR);
+        }
+    }
+#if WCHAR_MAX > 0xFFFFu
+    else if (ch < 0x110000)
+    {
+        dest.push_back(static_cast<char>(0xf0 | (ch >> 18)));
+        dest.push_back(static_cast<char>(0x80 | ((ch & 0x3ffff) >> 12)));
+        dest.push_back(static_cast<char>(0x80 | ((ch & 0xfff) >> 6)));
+        dest.push_back(static_cast<char>(0x80 | (ch & 0x3f)));
+    }
+#endif
+    else
+    {
+        // not a valid Unicode code point, or we only support BMP characters,
+        // so fall back to U+FFFD REPLACEMENT CHARACTER
+        dest.append(UTF8_REPLACEMENT_CHAR);
+    }
 }
 
 
 //! Perform a normalized comparison of two UTF-8 strings.  The normalization
 //! only works for characters in the WGL-4 subset, and no multicharacter
 //! translations are performed.
-int UTF8StringCompare(const std::string& s0, const std::string& s1)
+int UTF8StringCompare(std::string_view s0, std::string_view s1)
 {
-    int len0 = s0.length();
-    int len1 = s1.length();
-    int i0 = 0;
-    int i1 = 0;
-    while (i0 < len0 && i1 < len1)
+    auto len0 = static_cast<std::int32_t>(s0.size());
+    auto len1 = static_cast<std::int32_t>(s1.size());
+    std::int32_t i0 = 0;
+    std::int32_t i1 = 0;
+    for (;;)
     {
-        wchar_t ch0 = 0;
-        wchar_t ch1 = 0;
-        if (!UTF8Decode(s0, i0, ch0))
+        std::int32_t ch0;
+        std::int32_t ch1;
+        if (i0 >= len0 || !UTF8Decode(s0, i0, ch0))
+            return (i1 >= len1 || !UTF8Decode(s1, i1, ch1)) ? 0 : -1;
+        if (i1 >= len1 || !UTF8Decode(s1, i1, ch1))
             return 1;
-        if (!UTF8Decode(s1, i1, ch1))
-            return -1;
 
-        i0 += UTF8EncodedSize(ch0);
-        i1 += UTF8EncodedSize(ch1);
         ch0 = UTF8Normalize(ch0);
         ch1 = UTF8Normalize(ch1);
 
@@ -546,482 +431,104 @@ int UTF8StringCompare(const std::string& s0, const std::string& s1)
         if (ch0 > ch1)
             return 1;
     }
-
-    if (i0 == len0 && i1 == len1)
-        return 0;
-
-    len0 = UTF8Length(s0);
-    len1 = UTF8Length(s1);
-    if (len0 > len1)
-        return 1;
-    if (len0 < len1)
-        return -1;
-    else
-        return 0;
 }
 
-int UTF8StringCompare(const std::string& s0, const std::string& s1, size_t n, bool ignoreCase)
+bool UTF8StartsWith(std::string_view str, std::string_view prefix, bool ignoreCase)
 {
-    int len0 = s0.length();
-    int len1 = s1.length();
-    int i0 = 0;
-    int i1 = 0;
-    while (i0 < len0 && i1 < len1 && n > 0)
+    auto len0 = static_cast<std::int32_t>(str.size());
+    auto len1 = static_cast<std::int32_t>(prefix.size());
+    std::int32_t i0 = 0;
+    std::int32_t i1 = 0;
+    for (;;)
     {
-        wchar_t ch0 = 0;
-        wchar_t ch1 = 0;
-        if (!UTF8Decode(s0, i0, ch0))
-            return 1;
-        if (!UTF8Decode(s1, i1, ch1))
-            return -1;
+        std::int32_t ch0;
+        std::int32_t ch1;
+        if (i1 >= len1)
+            return true;
+        if (i0 >= len0 || !UTF8Decode(str, i0, ch0) || !UTF8Decode(prefix, i1, ch1))
+            return false;
 
-        i0 += UTF8EncodedSize(ch0);
-        i1 += UTF8EncodedSize(ch1);
         ch0 = UTF8Normalize(ch0);
         ch1 = UTF8Normalize(ch1);
 
         if (ignoreCase)
         {
-            ch0 = std::tolower(ch0);
-            ch1 = std::tolower(ch1);
+            if (ch0 >= 0 && ch0 <= WCHAR_MAX)
+                ch0 = static_cast<std::int32_t>(std::towlower(static_cast<std::wint_t>(ch0)));
+            if (ch1 >= 0 && ch1 <= WCHAR_MAX)
+                ch1 = static_cast<std::int32_t>(std::towlower(static_cast<std::wint_t>(ch1)));
         }
-        if (ch0 < ch1)
-            return -1;
-        if (ch0 > ch1)
-            return 1;
 
-        n--;
-    }
-
-    if (n == 0)
-        return 0;
-
-    len0 = UTF8Length(s0);
-    len1 = UTF8Length(s1);
-    if (len0 > len1)
-        return 1;
-    if (len0 < len1)
-        return -1;
-    else
-        return 0;
-}
-
-
-#if 0
-//! Currently incomplete, but could be a helpful class for dealing with
-//! UTF-8 streams
-class UTF8StringIterator
-{
-public:
-    UTF8StringIterator(const std::string& _str) : str(_str) {};
-    UTF8StringIterator(const UTF8StringIterator& iter) = default;
-
-    UTF8StringIterator& operator++();
-    UTF8StringIterator& operator++(int);
-
-private:
-    const std::string& str;
-    int position{ 0 };
-};
-
-
-UTF8StringIterator& UTF8StringIterator::operator++()
-{
-    return *this;
-}
-
-
-UTF8StringIterator& UTF8StringIterator::operator++(int)
-{
-    return *this;
-}
-#endif
-
-
-static const char *greekAlphabet[] =
-{
-    "Alpha",
-    "Beta",
-    "Gamma",
-    "Delta",
-    "Epsilon",
-    "Zeta",
-    "Eta",
-    "Theta",
-    "Iota",
-    "Kappa",
-    "Lambda",
-    "Mu",
-    "Nu",
-    "Xi",
-    "Omicron",
-    "Pi",
-    "Rho",
-    "Sigma",
-    "Tau",
-    "Upsilon",
-    "Phi",
-    "Chi",
-    "Psi",
-    "Omega"
-};
-
-static const char* greekAlphabetUTF8[] =
-{
-    "\316\261",
-    "\316\262",
-    "\316\263",
-    "\316\264",
-    "\316\265",
-    "\316\266",
-    "\316\267",
-    "\316\270",
-    "\316\271",
-    "\316\272",
-    "\316\273",
-    "\316\274",
-    "\316\275",
-    "\316\276",
-    "\316\277",
-    "\317\200",
-    "\317\201",
-    "\317\203",
-    "\317\204",
-    "\317\205",
-    "\317\206",
-    "\317\207",
-    "\317\210",
-    "\317\211",
-};
-
-static const char* canonicalAbbrevs[] =
-{
-    "ALF", "BET", "GAM", "DEL", "EPS", "ZET", "ETA", "TET",
-    "IOT", "KAP", "LAM", "MU" , "NU" , "XI" , "OMI", "PI" ,
-    "RHO", "SIG", "TAU", "UPS", "PHI", "CHI", "PSI", "OME",
-};
-
-static std::string noAbbrev;
-
-// Greek alphabet crud . . . should probably moved to it's own module.
-
-static size_t greekChunkLength(const std::string&);
-
-Greek* Greek::m_instance = nullptr;
-
-Greek* Greek::getInstance()
-{
-    if (m_instance == nullptr)
-        m_instance = new Greek();
-    return m_instance;
-}
-
-Greek::Greek()
-{
-    nLetters = sizeof(greekAlphabet) / sizeof(greekAlphabet[0]);
-    names = new std::string[nLetters];
-    abbrevs = new std::string[nLetters];
-
-    for (int i = 0; i < nLetters; i++)
-    {
-        names[i] = std::string(greekAlphabet[i]);
-        abbrevs[i] = std::string(canonicalAbbrevs[i]);
+        if (ch0 != ch1)
+            return false;
     }
 }
 
-Greek::~Greek()
+std::int32_t
+UTF8Validator::check(unsigned char c)
 {
-    delete[] names;
-    delete[] abbrevs;
-}
-
-const std::string& Greek::canonicalAbbreviation(const std::string& letter)
-{
-    Greek *instance = Greek::getInstance();
-    int i;
-    for (i = 0; i < instance->nLetters; i++)
+    switch (state)
     {
-        if (compareIgnoringCase(letter, instance->names[i]) == 0)
-            return instance->abbrevs[i];
-    }
-
-    for (i = 0; i < instance->nLetters; i++)
-    {
-        if (compareIgnoringCase(letter, instance->abbrevs[i]) == 0)
-            return instance->abbrevs[i];
-    }
-
-    if (letter.length() == 2)
-    {
-        for (i = 0; i < instance->nLetters; i++)
+    case State::Initial:
+        if (c < 0x80)
+            return static_cast<std::int32_t>(c);
+        if (c >= 0xc2 && c <= 0xf4)
         {
-            if (letter[0] == greekAlphabetUTF8[i][0] &&
-                letter[1] == greekAlphabetUTF8[i][1])
-            {
-                return instance->abbrevs[i];
-            }
+            buffer[0] = c;
+            state = State::Continuation1;
+            return PartialSequence;
         }
-    }
+        return InvalidStarter;
 
-    return noAbbrev;
-}
+    case State::Continuation1:
+        if (c < 0x80 || c > 0xbf ||
+            (buffer[0] == 0xe0 && c < 0xa0) ||
+            (buffer[0] == 0xed && c > 0x9f) ||
+            (buffer[0] == 0xf0 && c < 0x90) ||
+            (buffer[0] == 0xf4 && c > 0x8f))
+        {
+            state = State::Initial;
+            return InvalidTrailing;
+        }
+        if (buffer[0] < 0xe0)
+        {
+            state = State::Initial;
+            return ((static_cast<std::int32_t>(buffer[0]) & 0x1f) << 6) |
+                (static_cast<std::int32_t>(c) & 0x3f);
+        }
+        buffer[1] = c;
+        state = State::Continuation2;
+        return PartialSequence;
 
-static const char* toSuperscript(char c)
-{
-    switch (c)
-    {
-    case '0':
-        return UTF8_SUPERSCRIPT_0;
-    case '1':
-        return UTF8_SUPERSCRIPT_1;
-    case '2':
-        return UTF8_SUPERSCRIPT_2;
-    case '3':
-        return UTF8_SUPERSCRIPT_3;
-    case '4':
-        return UTF8_SUPERSCRIPT_4;
-    case '5':
-        return UTF8_SUPERSCRIPT_5;
-    case '6':
-        return UTF8_SUPERSCRIPT_6;
-    case '7':
-        return UTF8_SUPERSCRIPT_7;
-    case '8':
-        return UTF8_SUPERSCRIPT_8;
-    case '9':
-        return UTF8_SUPERSCRIPT_9;
+    case State::Continuation2:
+        if (c < 0x80 || c > 0xbf)
+        {
+            state = State::Initial;
+            return InvalidTrailing;
+        }
+        if (buffer[0] < 0xf0)
+        {
+            state = State::Initial;
+            return ((static_cast<std::int32_t>(buffer[0]) & 0x0f) << 12) |
+                ((static_cast<std::int32_t>(buffer[1]) & 0x3f) << 6) |
+                (static_cast<std::int32_t>(c) & 0x3f);
+        }
+        buffer[2] = c;
+        state = State::Continuation3;
+        return PartialSequence;
+
+    case State::Continuation3:
+        state = State::Initial;
+        if (c < 0x80 || c > 0xbf)
+            return InvalidTrailing;
+        return ((static_cast<std::int32_t>(buffer[0]) & 0x07) << 18) |
+            ((static_cast<std::int32_t>(buffer[1]) & 0x3f) << 12) |
+            ((static_cast<std::int32_t>(buffer[2]) & 0x3f) << 6) |
+            (static_cast<std::int32_t>(c) & 0x3f);
+
     default:
-        return nullptr;
+        // Should not be able to get here
+        assert(false);
+        return InvalidStarter;
     }
-}
-
-//! Replaces the Greek letter abbreviation at the beginning
-//! of a string by the UTF-8 representation of that letter.
-//! Also, replace digits following Greek letters with UTF-8
-//! superscripts.
-std::string ReplaceGreekLetterAbbr(const std::string& str)
-{
-    Greek *instance = Greek::getInstance();
-    size_t len = greekChunkLength(str);
-
-    if (str[0] >= 'A' && str[0] <= 'Z')
-    {
-        // Linear search through all letter abbreviations
-        for (int i = 0; i < instance->nLetters; i++)
-        {
-            std::string prefix = instance->abbrevs[i];
-            if (len != prefix.length() || UTF8StringCompare(str, prefix, len, true) != 0)
-            {
-                prefix = instance->names[i];
-                if (len != prefix.length() || UTF8StringCompare(str, prefix, len, true) != 0)
-                    continue;
-            }
-
-            std::string ret = greekAlphabetUTF8[i];
-            auto len = prefix.length();
-            for (; str.length() > len && isdigit(str[len]); len++)
-                ret += toSuperscript(str[len]);
-            ret += str.substr(len);
-            return ret;
-        }
-    }
-
-    return str;
-}
-
-//! Replaces the Greek letter abbreviation at the beginning
-//! of a string by the UTF-8 representation of that letter.
-//! Also, replace digits following Greek letters with UTF-8
-//! superscripts. Operates on char* instead of strings--less
-//! convenient, but more efficient. Return the number of
-//! characters copied to the destination string, not
-//! including the zero terminator.
-#if 0
-unsigned int
-ReplaceGreekLetterAbbr(char *dst, unsigned int dstSize, const char* src, unsigned int srcLength)
-{
-    Greek *instance = Greek::getInstance();
-    if (src[0] >= 'A' && src[0] <= 'Z' &&
-        src[1] >= 'A' && src[1] <= 'Z')
-    {
-        // Linear search through all letter abbreviations
-        for (unsigned int i = 0; i < (unsigned int) instance->nLetters; i++)
-        {
-            const char* abbr = canonicalAbbrevs[i];
-            unsigned int j = 0;
-            while (abbr[j] == src[j] && abbr[j] != '\0' && src[j] != '\0')
-                j++;
-
-            // It's a match if we reached the end of the abbreviation string
-            if (abbr[j] == '\0')
-            {
-                unsigned int abbrevLength = j;
-                unsigned int srcIndex = j;
-                const char *superscript = toSuperscript(src[abbrevLength]);
-
-                const char* utfGreek = greekAlphabetUTF8[i];
-                unsigned int utfGreekLength = strlen(utfGreek);
-
-                unsigned int requiredLength = srcLength;
-                if (utfGreekLength > abbrevLength)
-                    requiredLength += utfGreekLength - abbrevLength;
-                if (superscript != nullptr)
-                {
-                    requiredLength += strlen(superscript) - 1;
-                    srcIndex++;
-                }
-
-                // If there's not enough room, give up translating and just copy as much as possible
-                if (requiredLength + 1 > dstSize)
-                    break;
-
-                unsigned int dstIndex = 0;
-                j = 0;
-                while (utfGreek[j] != 0)
-                {
-                    dst[dstIndex++] = utfGreek[j];
-                    j++;
-                }
-
-                if (superscript != nullptr)
-                {
-                    j = 0;
-                    while (superscript[j] != 0)
-                    {
-                        dst[dstIndex++] = superscript[j];
-                        j++;
-                    }
-                }
-
-                while (src[srcIndex] != 0)
-                {
-                    dst[dstIndex++] = src[srcIndex++];
-                }
-                dst[dstIndex] = '\0';
-
-                return dstIndex;
-            }
-        }
-    }
-
-    strncpy(dst, src, dstSize);
-    if (dstSize > srcLength)
-        return srcLength;
-
-
-    if (dstSize > 0)
-    {
-        dst[dstSize - 1] = '\0';
-        return dstSize - 1;
-    }
-
-    return 0;
-}
-#endif
-
-static int findGreekNameIndexBySubstr(const std::string &, int = 0, unsigned int = UINT_MAX);
-#if 0
-static std::string firstGreekAbbrCompletion(const std::string &);
-#endif
-
-bool inline isSubstringIgnoringCase(const std::string &s0, const std::string &s1, size_t n)
-{
-    return UTF8StringCompare(s0, s1, n, true) == 0;
-}
-
-static int findGreekNameIndexBySubstr(const std::string &s, int start, unsigned int n)
-{
-    Greek *instance = Greek::getInstance();
-
-    if (s.empty())
-        return -1;
-
-    for (int i = start; i < instance->nLetters; i++)
-    {
-        if (isSubstringIgnoringCase(instance->names[i], s, n))
-            return i;
-    }
-
-    for (int i = start; i < instance->nLetters; i++)
-    {
-        if (isSubstringIgnoringCase(instance->abbrevs[i], s, n))
-            return i;
-    }
-
-    return -1;
-}
-
-static size_t greekChunkLength(const std::string& str)
-{
-    bool npos = false;
-    size_t sp = str.find_first_of(' ');
-    if (sp == std::string::npos)
-    {
-        sp = str.length();
-        npos = true;
-    }
-
-    if (sp != 0 && isdigit(static_cast<unsigned char>(str[sp - 1])))
-        while(sp != 0 && isdigit(static_cast<unsigned char>(str[sp - 1]))) sp--;
-    else if (npos)
-        sp = std::string::npos;
-    return sp;
-}
-
-#if 0
-static std::string firstGreekAbbrCompletion(const std::string &s)
-{
-    std::string ret;
-    size_t sp = greekChunkLength(s);
-    if (sp == std::string::npos)
-    {
-        int i = findGreekNameIndexBySubstr(s);
-        return (i >= 0) ? Greek::getInstance()->abbrevs[i] : s;
-    }
-    else
-    {
-        std::string prefix = s.substr(0, sp);
-        ret = Greek::canonicalAbbreviation(prefix);
-        return ret.empty() ? s : prefix + s.substr(sp);
-    }
-
-    return ret;
-}
-#endif
-
-std::vector<std::string> getGreekCompletion(const std::string &s)
-{
-    std::vector<std::string> ret;
-    if (s.empty())
-        return ret;
-
-    size_t sp = greekChunkLength(s);
-    if (sp == std::string::npos)
-    {
-        sp = UTF8Length(s);
-        for(int i = 0; i >= 0;)
-        {
-            std::string rets;
-            i = findGreekNameIndexBySubstr(s, i, sp);
-            if (i >= 0)
-            {
-                rets = Greek::getInstance()->abbrevs[i];
-                rets += " ";
-                ret.emplace_back(ReplaceGreekLetterAbbr(rets));
-                i++;
-            }
-        }
-    }
-    else
-    {
-        std::string prefix = s.substr(0, sp);
-        std::string rets = Greek::canonicalAbbreviation(prefix);
-        if (!rets.empty())
-        {
-            rets += s.substr(sp);
-            ret.emplace_back(ReplaceGreekLetterAbbr(rets));
-        }
-    }
-
-    return ret;
 }

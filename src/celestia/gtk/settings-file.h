@@ -10,15 +10,16 @@
  *  $Id: settings-file.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_SETTINGS_FILE_H
-#define GTK_SETTINGS_FILE_H
+#pragma once
 
 #include <gtk/gtk.h>
 
 #include "common.h"
 
-
 #define CELESTIARC ".celestiarc"
+
+namespace celestia::gtk
+{
 
 /* Initialize Settings File */
 void initSettingsFile(AppData* app);
@@ -30,4 +31,4 @@ void applySettingsFileMain(AppData* app, GKeyFile* file);
 /* Save Settings to File */
 void saveSettingsFile(AppData* app);
 
-#endif /* GTK_SETTINGS_FILE_H */
+} // end namespace celestia::gtk

@@ -10,13 +10,12 @@
 #pragma once
 
 #include "celx_internal.h"
+#include <celengine/category.h>
 
-class UserCategory;
 
-inline int celxClassId(UserCategory *)
+inline int celxClassId(UserCategoryId)
 {
     return Celx_Category;
 }
 
 void CreateCategoryMetaTable(lua_State *);
-

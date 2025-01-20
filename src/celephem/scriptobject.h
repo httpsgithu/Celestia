@@ -9,23 +9,24 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_SCRIPTOBJECT_H_
-#define _CELENGINE_SCRIPTOBJECT_H_
+#pragma once
 
 #ifndef LUA_VER
 #define LUA_VER 0x050100
 #endif
 
-#include "lua.hpp"
-#include <iostream>
 #include <string>
-#include <celengine/parser.h>
 
+#include <lua.hpp>
+
+class AssociativeArray;
+
+namespace celestia::ephem
+{
 
 void SetScriptedObjectContext(lua_State* l);
 
 lua_State* GetScriptedObjectContext();
-
 
 std::string GenerateScriptObjectName();
 
@@ -38,6 +39,6 @@ double SafeGetLuaNumber(lua_State* state,
                         const std::string& key,
                         double defaultValue);
 
-void SetLuaVariables(lua_State* state, Hash* parameters);
+void SetLuaVariables(lua_State* state, const AssociativeArray& parameters);
 
-#endif // _CELENGINE_SCRIPTOBJECT_H_
+}

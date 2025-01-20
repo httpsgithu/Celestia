@@ -5,7 +5,11 @@ macro(install_perl_tools)
 
   set(__sources ${ARGV})
 
-  install(PROGRAMS ${__sources} DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(
+    PROGRAMS ${__sources}
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT tools
+  )
 endmacro()
 
 add_subdirectory(atmosphere)
@@ -14,7 +18,6 @@ add_subdirectory(charm2)
 add_subdirectory(cmod)
 add_subdirectory(galaxies)
 add_subdirectory(globulars)
-add_subdirectory(qttxf)
 add_subdirectory(spice2xyzv)
 add_subdirectory(stardb)
 add_subdirectory(vsop)

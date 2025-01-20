@@ -2,28 +2,57 @@
 
 Stable version installation on Unix-like systems (e.g. GNU/Linux or *BSD):
 * Check your OS repository for already built packages.
-* Check https://celestia.space/download.html.
+* Check https://celestiaproject.space/download.html.
 
 Stable version installation on Windows and OSX:
-* Check https://celestia.space/download.html.
+* Check https://celestiaproject.space/download.html.
 
 Development snapshots installation on Unix-like systems:
-### On Debian 10 (buster) and derived systems:
+### On Debian 11/12 (bullseye/bookworm) and derived systems:
 
+Download and check the GPG public key fingerprint and expiration date:
 ```
-❯ curl -fsSL -o celestia.gpg https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_10/Release.key
+❯ curl -fsSL -o celestia.gpg https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_${VERSION}/Release.key
+
 ❯ gpg --keyid-format long celestia.gpg
 gpg: WARNING: no command supplied.  Trying to guess what you mean ...
-pub   rsa2048/BDF3F6ACD4D81407 2014-06-09 [SC] [expires: 2023-02-14]
+pub   rsa2048/BDF3F6ACD4D81407 2014-06-09 [SC] [expires: 2025-04-10]
       3FE0C0AC1FD6F1034B818A14BDF3F6ACD4D81407
 uid                           home:munix9 OBS Project <home:munix9@build.opensuse.org>
+```
+
+Deploy GPG public key and set up sources.list file:
+```
 ❯ sudo mv celestia.gpg /usr/share/keyrings/celestia.asc
 
-❯ echo "deb [signed-by=/usr/share/keyrings/celestia.asc] https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_10/ ./" | sudo tee /etc/apt/sources.list.d/celestia-obs.list
+❯ echo "deb [signed-by=/usr/share/keyrings/celestia.asc] https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_${VERSION}/ ./" | sudo tee /etc/apt/sources.list.d/celestia-obs.list
 ❯ sudo apt update && sudo apt install celestia
 ```
 
-### On Ubuntu 18.04/20.04 and derived systems:
+Where ${VERSION} is 11 or 12.
+
+When the public key has expired, `apt update` complains:
+
+```
+❯ sudo apt update
+[...]
+Err:14 https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_11 ./ InRelease
+  The following signatures were invalid: EXPKEYSIG BDF3F6ACD4D81407 home:munix9 OBS Project <home:munix9@build.opensuse.org>
+Fetched 19.0 kB in 1s (14.7 kB/s)
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+12 packages can be upgraded. Run 'apt list --upgradable' to see them.
+W: An error occurred during the signature verification. The repository is not updated and the previous index files will be used. GPG error: https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_11 ./ InRelease: The foll
+owing signatures were invalid: EXPKEYSIG BDF3F6ACD4D81407 home:munix9 OBS Project <home:munix9@build.opensuse.org>
+W: Failed to fetch https://download.opensuse.org/repositories/home:/munix9:/unstable/Debian_11/./InRelease  The following signatures were invalid: EXPKEYSIG BDF3F6ACD4D81407 home:munix9 OBS Project <home:munix9@build.opensuse.org>
+W: Some index files failed to download. They have been ignored, or old ones used instead.
+```
+
+The `Release.key` should already have been updated.
+Just download the GPG public key again, check the fingerprint and expiration date and re-deploy it.
+
+### On Ubuntu 22.04/24.04 and derived systems:
 
 ```
 curl https://download.opensuse.org/repositories/home:/munix9:/unstable/Ubuntu_${VERSION}/Release.key | sudo apt-key add -
@@ -31,18 +60,18 @@ echo "deb https://download.opensuse.org/repositories/home:/munix9:/unstable/Ubun
 sudo apt update && sudo apt install celestia
 ```
 
-Where VERSION is 18.04 or 20.04.
+Where VERSION is 22.04 or 24.04.
 
 
 ### On openSUSE Leap/Tumbleweed:
 
 ```
-sudo zypper addrepo https://download.opensuse.org/repositories/home:munix9:unstable/openSUSE_${VERSION}/home:munix9:unstable.repo
+sudo zypper addrepo https://download.opensuse.org/repositories/home:munix9:unstable/${VERSION}/home:munix9:unstable.repo
 sudo zypper refresh
 sudo zypper install celestia
 ```
 
-Where VERSION is 'Leap_15.2', 'Leap_15.3' or 'Tumbleweed'.
+Where VERSION is '15.5', '15.6' or 'openSUSE_Tumbleweed'.
 
 See also the download package sites on OBS for [celestia](https://software.opensuse.org/download.html?project=home:munix9:unstable&package=celestia) and [celestia-data](https://software.opensuse.org/download.html?project=home:munix9:unstable&package=celestia-data).
 
@@ -50,7 +79,7 @@ See also the download package sites on OBS for [celestia](https://software.opens
 
 Try experimental portable AppImage (see https://github.com/CelestiaProject/Celestia/issues/333):
 ```
-wget https://download.opensuse.org/repositories/home:/munix9:/unstable/AppImage/celestia-1.7.0-git-x86_64.AppImage
+wget -O celestia-1.7.0-git-x86_64.AppImage https://download.opensuse.org/repositories/home:/munix9:/unstable/AppImage/celestia-latest-x86_64.AppImage
 chmod 755 celestia-1.7.0-git-x86_64.AppImage
 ```
 
@@ -79,23 +108,27 @@ git submodule update --init
 
 ## Celestia Install instructions for UNIX
 
-First you need a C++ compiler able to compile C++11 code (GCC 4.8.1 or later,
-Clang 3.3 or later), CMake, GNU Make or Ninja.
+First you need a C++ compiler able to compile C++17 code (GCC 7 or later,
+Clang 5 or later), CMake, GNU Make or Ninja, and gperf.
+
+When building with Qt6 interface (see below), you need a compiler with full
+support for C++ filesystem library, e.g. GCC 8 or Clang 7.
 
 Then you need to have the following devel components installed before Celestia
-will build: OpenGL, libepoxy, fmtlib, Eigen3, freetype, libjpeg, and libpng.
-Optional packages are gettext, Qt5, Gtk2 or Gtk3, sdl2, ffmpeg, glu and glut.
+will build: OpenGL, libboost, libepoxy, fmtlib, Eigen3, freetype, libjpeg, and
+libpng. Optional packages are gettext, Qt5, Gtk2 or Gtk3, sdl2, ffmpeg,
+libavif, glu.
 
 For example on modern Debian-derived system you need to install the following
-packages: libepoxy-dev, libjpeg-dev, libpng-dev, libgl1-mesa-dev,
+packages: libboost-dev, libepoxy-dev, libjpeg-dev, libpng-dev, libgl1-mesa-dev,
 libeigen3-dev, libfmt-dev, libfreetype6-dev. Then you may want to install
 libglu1-mesa-dev, required by some tools; qtbase5-dev, qtbase5-dev-tools and
 libqt5opengl5-dev if you want to build with Qt5 interface; libgtk2.0-dev and
 libgtkglext1-dev to build with legacy Gtk2 interface; libgtk3.0-dev to build
-Gtk3 interface, libsdl2-dev to build SDL interface or freeglut3-dev to build
-with glut interface. libavcodec-dev, libavformat-dev, libavutil-dev and
-libswscale-dev are required to build with video capture support.
-
+Gtk3 interface, or libsdl2-dev to build SDL interface. libavcodec-dev,
+libavformat-dev, libavutil-dev and libswscale-dev are required to build with
+video capture support. libavif-dev is required to build to AVIF texture
+support.
 
 OK, assuming you've collected all the necessary libraries, here's
 what you need to do to build and run Celestia:
@@ -103,25 +136,23 @@ what you need to do to build and run Celestia:
 ```
 mkdir build
 cd build
-cmake .. -DENABLE_DATA=ON -DENABLE_INTERFACE=ON [*]
+cmake .. -DENABLE_INTERFACE=ON [*]
 make
 sudo make install
 ```
 
-[*] `INTERFACE` must be replaced with one of "`QT`", "`GTK`", "`SDL`" or
-"`GLUT`".
+[*] `INTERFACE` must be replaced with one of "`QT`", "`GTK`", or "`SDL`"
 
 Four interfaces are available for Celestia on Unix-like systems:
-- GLUT: minimal interface, barebone Celestia core with no toolbar or menu...
-       Disabled by default.
 - SDL: minimal interface, barebone Celestia core with no toolbar or menu...
        Disabled by default.
 - GTK: A full interface with minimal dependencies, adds a menu, a configuration
        dialog some other utilities. Legacy interface, may lack some new
        features. Disabled by default.
-- QT: A full interface with minimal dependencies, adds a menu, a configuration
-      dialog some other utilities, bookmarks... A preferred option. Enabled by
-      default, No need to pass -DENABLE_QT=ON.
+- QT5: A full interface with minimal dependencies, adds a menu, a configuration
+       dialog some other utilities, bookmarks... A preferred option. Enabled by
+       default, No need to pass -DENABLE_QT5=ON.
+- QT6: As above, but compiled with Qt6.
 
 Starting with version 1.3.1, Lua is the new scripting engine for Celestia,
 the old homegrown scripting engine is still available. By default Lua support
@@ -149,25 +180,28 @@ following option to cmake: -DCMAKE_INSTALL_PREFIX=/another/path.
 
 ## Celestia Install instructions for Windows (MSVC)
 
-Currently to build on Windows you need a Visual Studio 2015 or later, CMake
+Currently to build on Windows you need Visual Studio 2015 or later, CMake
 and vcpkg (*).
 
 Install required packages:
 
 ```
-vcpkg --triplet=TRIPLET install --recurse libpng libjpeg-turbo gettext luajit fmt libepoxy eigen3 freetype
+vcpkg --triplet=TRIPLET install --recurse boost-container boost-smart-ptr libpng libjpeg-turbo gettext gperf luajit fmt libepoxy eigen3 freetype
 ```
 
 Install optional packages:
 
 ```
-vcpkg --triplet=TRIPLET install --recurse qt5-base ffmpeg cspice
+vcpkg --triplet=TRIPLET install --recurse qt5-base ffmpeg[x264] cspice libavif
 ```
 
 Replace TRIPLET with `x86-windows` to build 32-bit versions or `x64-windows`
 for 64-bit versions.
 
 Instead of `luajit` `lua` can be used.
+
+Use `vcpkg list` to ensure that all packages have actually been installed.
+If not, try installing them one at a time.
 
 Configure and build 32-bit version:
 
@@ -187,8 +221,8 @@ cmake -DCMAKE_GENERATOR_PLATFORM=x64 -DCMAKE_TOOLCHAIN_FILE=c:/tools/vcpkg/scrip
 cmake --build . --  /maxcpucount:N /nologo
 ```
 
-Instead of N in /maxcpucount pass a number of CPU cores you want to use during
-a build.
+Instead of N in /maxcpucount pass the number of CPU cores you want to use during
+the build.
 
 This example assumes that `vcpkg` is installed into `c:/tools/vcpkg`. Update
 the path to `vcpkg.cmake` according to your installation.
@@ -226,7 +260,7 @@ pacman -S base-devel
 pacman -S git
 pacman -S mingw-w64-x86_64-cmake
 pacman -S mingw-w64-x86_64-qt5
-pacman -S mingw-w64-x86_64-freeglut mingw-w64-x86_64-libepoxy mingw-w64-x86_64-lua
+pacman -S mingw-w64-x86_64-libepoxy mingw-w64-x86_64-lua
 pacman -S mingw-w64-x86_64-mesa
 ```
 
@@ -281,13 +315,13 @@ Install Homebrew
 Install required packages:
 
 ```
-brew install pkg-config cmake fmt gettext libepoxy libpng lua qt5 jpeg eigen freetype ffmpeg
+brew install pkg-config cmake fmt gettext gperf libepoxy libpng lua qt5 jpeg eigen freetype boost
 ```
 
 Install optional packages:
 
 ```
-brew install cspice
+brew install cspice ffmpeg libavif
 ```
 
 Follow common building instructions to fetch the source.
@@ -313,39 +347,38 @@ Celestia will be installed into /usr/local by default, with data files landing
 in /usr/local/share/celestia, but you may want to specify a new location with
 the following option to cmake: `-DCMAKE_INSTALL_PREFIX=/another/path`.
 
-To build the application bundle, pass -DNATIVE_OSX_APP=ON to the cmake command,
-the application bundle will be located in the "build" folder that you previously
-created.
-
 ## Supported CMake parameters
 
 List of supported parameters (passed as `-DPARAMETER=VALUE`):
 
- Parameter            | TYPE | Default | Description
-----------------------| ------|---------|--------------------------------------
-| CMAKE_INSTALL_PREFIX | path | \*       | Prefix where to install Celestia
-| CMAKE_PREFIX_PATH    | path |         | Additional path to look for libraries
+ Parameter             | TYPE | Default   | Description
+-----------------------|------|-----------|--------------------------------------
+| CMAKE_INSTALL_PREFIX | path | \*        | Prefix where to install Celestia
+| CMAKE_PREFIX_PATH    | path |           | Additional path to look for libraries
 | LEGACY_OPENGL_LIBS   | bool | \*\*OFF   | Use OpenGL libraries not GLvnd
-| ENABLE_CELX          | bool | ON      | Enable Lua scripting support
-| ENABLE_SPICE         | bool | OFF     | Enable NAIF kernels support
-| ENABLE_NLS           | bool | ON      | Enable interface translation
-| ENABLE_GLUT          | bool | OFF     | Build simple Glut frontend
+| ENABLE_CELX          | bool | ON        | Enable Lua scripting support
+| ENABLE_SPICE         | bool | OFF       | Enable NAIF kernels support
+| ENABLE_NLS           | bool | ON        | Enable interface translation
 | ENABLE_GTK           | bool | \*\*OFF   | Build legacy GTK2 frontend
-| ENABLE_QT            | bool | ON      | Build Qt frontend
-| ENABLE_SDL           | bool | OFF     | Build SQL frontend
-| ENABLE_WIN           | bool | \*\*\*ON   | Build Windows native frontend
-| ENABLE_FFMPEG        | bool | \*\*ON    | Support video capture using ffmpeg
-| ENABLE_TOOLS         | bool | OFF     | Build tools for Celestia data files
-| ENABLE_DATA          | bool | OFF     | Use CelestiaContent submodule for data
-| ENABLE_GLES          | bool | OFF     | Use OpenGL ES 2.0 in rendering code
-| NATIVE_OSX_APP       | bool | OFF     | Support native OSX data paths
-| USE_GTKGLEXT         | bool | ON      | Use libgtkglext1 in GTK2 frontend
-| USE_GTK3             | bool | OFF     | Use Gtk3 instead of Gtk2 in GTK2 frontend
+| ENABLE_QT5           | bool | OFF       | Build Qt5 frontend
+| ENABLE_QT6           | bool | OFF       | Build Qt6 frontend
+| ENABLE_SDL           | bool | OFF       | Build SDL frontend
+| ENABLE_WIN           | bool | \*\*\*ON  | Build Windows native frontend
+| ENABLE_FFMPEG        | bool | OFF       | Support video capture using ffmpeg
+| ENABLE_LIBAVIF       | bool | OFF       | Support AVIF texture using libavif
+| ENABLE_MINIAUDIO     | bool | OFF       | Support audio playback using miniaudio
+| ENABLE_TOOLS         | bool | OFF       | Build tools for Celestia data files
+| ENABLE_GLES          | bool | OFF       | Use OpenGL ES 2.0 in rendering code
+| USE_GTKGLEXT         | bool | ON        | Use libgtkglext1 in GTK2 frontend
+| USE_QT6              | bool | OFF       | Use Qt6 in Qt frontend
+| USE_GTK3             | bool | OFF       | Use Gtk3 instead of Gtk2 in GTK2 frontend
+| USE_GLSL_STRUCTS     | bool | OFF       | Use structs in GLSL
+| USE_ICU              | bool | OFF       | Use ICU for UTF8 decoding for text rendering
+| USE_MESHOPTIMIZER    | bool | OFF       | Use meshoptimizer when loading models
 
 Notes:
  \* /usr/local on Unix-like systems, c:\Program Files or c:\Program Files (x86)
    on Windows depending on OS type (32 or 64 bit) and build configuration.
-   This option effect is overriden by NATIVE_OSX_APP.
  \*\* Ignored on Windows systems.
  \*\*\* Ignored on Unix-like systems.
  `USE_GTK3` requires `ENABLE_GTK`
@@ -362,13 +395,33 @@ On Windows systems two additonal options are supported:
 Please note that not all options are compatible:
 - `USE_GTKGLEXT` is not compatible with `ENABLE_GLES` and `USE_GTK3` and will
   be disabled if any of this is set.
-- `ENABLE_GLES` is not compatible with `ENABLE_GLUT` and with `ENABLE_QT` if
-  your `glut` or Qt5 installation don't support OpenGL ES.
+- `ENABLE_GLES` is not compatible with `ENABLE_QT5` or `ENABLE_QT6` if your Qt
+  installation doesn't support OpenGL ES.
+- `ENABLE_QT5` and `ENABLE_QT6` are not compatible on Apple systems due to
+  include path conflicts.
+
+## Installing the content
+
+See that the above build instructions are *not* enough to get a running
+Celestia installation, as they are only for the binaries.
+The content -- which is kept in a separate git repository at
+https://github.com/CelestiaProject/CelestiaContent -- also needs to be
+installed:
+
+```
+git clone https://github.com/CelestiaProject/CelestiaContent.git
+cd CelestiaContent
+mkdir build
+cd build
+cmake ..
+make
+sudo make install
+```
 
 Executable files
 ----------------
 
-As said prevously Celestia provides several user interfaces, accordingly with
+As said previously Celestia provides several user interfaces, accordingly with
 interfaces it's built with it has different executable files installed to
 ${CMAKE_INSTALL_PREFIX}/bin (e.g. with default CMAKE_INSTALL_PREFIX on
 Unix-like systems they are installed into `/usr/local/bin`).
@@ -377,8 +430,8 @@ Here's the table which provides executable file names accordingly to interface:
 
  Interface  | Executable name
 |-----------|----------------|
-| Qt5       | celestia-qt
+| Qt5       | celestia-qt5
+| Qt6       | celestia-qt6
 | GTK       | celestia-gtk
-| GLUT      | celestia-glut
 | SDL       | celestia-sdl
 | WIN       | celestia-win
