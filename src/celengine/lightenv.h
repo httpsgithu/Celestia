@@ -10,18 +10,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_LIGHTENV_H_
-#define _CELENGINE_LIGHTENV_H_
+#pragma once
 
 #include <celutil/color.h>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <vector>
 
-static const unsigned int MaxLights = 8;
+constexpr unsigned int MaxLights = 8;
 
 class Body;
-class RingSystem;
+struct RingSystem;
 
 class DirectionalLight
 {
@@ -41,8 +40,6 @@ public:
 class EclipseShadow
 {
 public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     const Body* caster;
     Eigen::Quaternionf casterOrientation;
     Eigen::Vector3f origin;
@@ -55,8 +52,6 @@ public:
 class RingShadow
 {
 public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     RingSystem* ringSystem;
     Eigen::Quaternionf casterOrientation;
     Eigen::Vector3f origin;
@@ -67,9 +62,7 @@ public:
 class LightingState
 {
 public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-    typedef std::vector<EclipseShadow, Eigen::aligned_allocator<EclipseShadow> > EclipseShadowVector;
+    using EclipseShadowVector = std::vector<EclipseShadow>;
 
     LightingState() :
         nLights(0),
@@ -78,9 +71,9 @@ public:
         eyePos_obj(-Eigen::Vector3f::UnitZ())
     {
         shadows[0] = nullptr;
-        for (unsigned int i = 0; i < MaxLights; ++i)
+        for (auto &ringShadow : ringShadows)
         {
-            ringShadows[i].ringSystem = nullptr;
+            ringShadow.ringSystem = nullptr;
         }
     };
 
@@ -97,5 +90,3 @@ public:
 
     Eigen::Vector3f ambientColor;
 };
-
-#endif // _CELENGINE_LIGHTENV_H_

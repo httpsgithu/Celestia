@@ -7,185 +7,204 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include "frustum.h"
-#include <Eigen/LU>
 #include <cmath>
+#include <type_traits>
+#include <utility>
 
-using namespace Eigen;
+#include <Eigen/LU>
 
-namespace celmath
+#include <celutil/array_view.h>
+#include "frustum.h"
+
+namespace celestia::math
 {
 
-Frustum::Frustum(float fov, float aspectRatio, float n) :
-    infinite(true)
+namespace
 {
-    init(fov, aspectRatio, n, n);
-}
 
+constexpr auto NearIdx = static_cast<std::size_t>(FrustumPlane::Near);
+constexpr auto FarIdx = static_cast<std::size_t>(FrustumPlane::Far);
 
-Frustum::Frustum(float fov, float aspectRatio, float n, float f) :
-    infinite(false)
+void
+init(Frustum::PlaneType* planes, float l, float r, float t, float b, float n)
 {
-    init(fov, aspectRatio, n, f);
-}
+    std::array<Eigen::Vector3f, 4> normals
+    {
+        Eigen::Vector3f(0.0f,    n,  b), // Bottom
+        Eigen::Vector3f(0.0f,   -n, -t), // Top
+        Eigen::Vector3f(   n, 0.0f,  l), // Left
+        Eigen::Vector3f(  -n, 0.0f, -r), // Right
+    };
 
-
-void Frustum::init(float fov, float aspectRatio, float n, float f)
-{
-    float h = std::tan(fov / 2.0f);
-    float w = h * aspectRatio;
-
-    Vector3f normals[4];
-    normals[Bottom] = Vector3f( 0.0f,  1.0f, -h);
-    normals[Top]    = Vector3f( 0.0f, -1.0f, -h);
-    normals[Left]   = Vector3f( 1.0f,  0.0f, -w);
-    normals[Right]  = Vector3f(-1.0f,  0.0f, -w);
     for (unsigned int i = 0; i < 4; i++)
     {
-        planes[i] = Hyperplane<float, 3>(normals[i].normalized(), 0.0f);
+        planes[i] = Eigen::Hyperplane<float, 3>(normals[i].normalized(), 0.0f);
     }
 
-    planes[Near] = Hyperplane<float, 3>(Vector3f(0.0f, 0.0f, -1.0f), -n);
-    planes[Far]  = Hyperplane<float, 3>(Vector3f(0.0f, 0.0f,  1.0f),  f);
+    planes[NearIdx] = Eigen::Hyperplane<float, 3>(Eigen::Vector3f(0.0f, 0.0f, -1.0f), -n);
 }
-
-
-Frustum::Aspect
-Frustum::test(const Eigen::Vector3f& point) const
-{
-    unsigned int nPlanes = infinite ? 5 : 6;
-
-    for (unsigned int i = 0; i < nPlanes; i++)
-    {
-        if (planes[i].signedDistance(point) < 0.0f)
-            return Outside;
-    }
-
-    return Inside;
-}
-
-
-Frustum::Aspect
-Frustum::testSphere(const Eigen::Vector3f& center, float radius) const
-{
-    unsigned int nPlanes = infinite ? 5 : 6;
-    unsigned int intersections = 0;
-
-    for (unsigned int i = 0; i < nPlanes; i++)
-    {
-        float distanceToPlane = planes[i].signedDistance(center);
-        if (distanceToPlane < -radius)
-            return Outside;
-        if (distanceToPlane <= radius)
-            intersections |= (1 << i);
-    }
-
-    return (intersections == 0) ? Inside : Intersect;
-}
-
-
-/** Double precision version of testSphere()
-  */
-Frustum::Aspect
-Frustum::testSphere(const Eigen::Vector3d& center, double radius) const
-{
-    int nPlanes = infinite ? 5 : 6;
-    int intersections = 0;
-
-    // IMPORTANT: Celestia relies on this calculation being peformed at double
-    // precision. Simply converting center to single precision is NOT an
-    // allowable optimization.
-    for (int i = 0; i < nPlanes; i++)
-    {
-        double distanceToPlane = planes[i].cast<double>().signedDistance(center);
-        if (distanceToPlane < -radius)
-            return Outside;
-        if (distanceToPlane <= radius)
-            intersections |= (1 << i);
-    }
-
-    return (intersections == 0) ? Inside : Intersect;
-}
-
-
-/*
-Frustum::Aspect Frustum::testCapsule(const Capsulef& capsule) const
-{
-    int nPlanes = infinite ? 5 : 6;
-    int intersections = 0;
-    float r2 = capsule.radius * capsule.radius;
-
-    // TODO: Unnecessary after Eigen conversion of Capsule class
-    Vector3f capsuleOrigin(capsule.origin.x, capsule.origin.y, capsule.origin.z);
-    Vector3f capsuleAxis(capsule.axis.x, capsule.axis.y, capsule.axis.z);
-
-    for (int i = 0; i < nPlanes; i++)
-    {
-        float signedDist0 = planes[i].signedDistance(capsuleOrigin);
-        float signedDist1 = planes[i].signedDistance(capsuleOrigin + capsuleAxis);
-        //float signedDist1 = signedDist0 + planes[i].normal * capsule.axis;
-        if (signedDist0 * signedDist1 > r2)
-        {
-            // Endpoints of capsule are on same side of plane; test closest endpoint to see if it
-            // lies closer to the plane than radius
-            if (abs(signedDist0) <= abs(signedDist1))
-            {
-                if (signedDist0 < -capsule.radius)
-                    return Outside;
-                if (signedDist0 < capsule.radius)
-                    intersections |= (1 << i);
-            }
-            else
-            {
-                if (signedDist1 < -capsule.radius)
-                    return Outside;
-                if (signedDist1 < capsule.radius)
-                    intersections |= (1 << i);
-            }
-        }
-        else
-        {
-            // Capsule endpoints are on different sides of the plane, so we have an intersection
-            intersections |= (1 << i);
-        }
-    }
-
-    return (intersections == 0) ? Inside : Intersect;
-}
-*/
 
 void
-Frustum::transform(const Matrix3f& m)
+init(Frustum::PlaneType* planes, float fov, float aspectRatio, float n)
 {
-    unsigned int nPlanes = infinite ? 5 : 6;
+    float h = std::tan(fov * 0.5f);
+    float w = h * aspectRatio;
 
-    for (unsigned int i = 0; i < nPlanes; i++)
+    init(planes, -w * n, w * n, h * n, -h * n, n);
+}
+
+Frustum::PlaneType
+createFarPlane(float f)
+{
+    return Frustum::PlaneType(Eigen::Vector3f(0.0f, 0.0f,  1.0f), f);
+}
+
+void
+doTransform(Frustum::PlaneType* planes, unsigned int nPlanes, const Eigen::Matrix3f& matrix)
+{
+    for (unsigned int i = 0; i < nPlanes; ++i)
     {
-        planes[i] = planes[i].transform(m, Eigen::Isometry);
+        planes[i] = planes[i].transform(matrix, Eigen::Isometry);
     }
 }
 
-
 void
-Frustum::transform(const Matrix4f& m)
+doTransform(Frustum::PlaneType* planes, unsigned int nPlanes, const Eigen::Matrix4f& matrix)
 {
-    unsigned int nPlanes = infinite ? 5 : 6;
-    Matrix4f invTranspose = m.inverse().transpose();
+    Eigen::Matrix4f invTranspose = matrix.inverse().transpose();
 
-    for (unsigned int i = 0; i < nPlanes; i++)
+    for (unsigned int i = 0; i < nPlanes; ++i)
     {
         planes[i].coeffs() = invTranspose * planes[i].coeffs();
         planes[i].normalize();
-
-        //float s = 1.0f / planes[i].normal().norm();
-        //planes[i].normal() *= s;
-        //planes[i].offset() *= s;
-
-        //planes[i] = planes[i] * invTranspose;
-        //float s = 1.0f / planes[i].normal().norm();
-        //planes[i].normal = planes[i].normal * s;
-        //planes[i].d *= s;
     }
+}
+
+FrustumAspect
+doTest(util::array_view<Frustum::PlaneType> planes, const Eigen::Vector3f& point)
+{
+    for (const auto& plane : planes)
+    {
+        if (plane.signedDistance(point) < 0.0f)
+            return FrustumAspect::Outside;
+    }
+
+    return FrustumAspect::Inside;
+}
+
+template<typename PREC>
+FrustumAspect
+doTestSphere(util::array_view<Frustum::PlaneType> planes,
+             const Eigen::Matrix<PREC, 3, 1>& center,
+             PREC radius)
+{
+    bool isIntersecting = false;
+
+    for (const auto& plane : planes)
+    {
+        PREC distanceToPlane;
+        if constexpr (std::is_same_v<PREC, float>)
+        {
+            distanceToPlane = plane.signedDistance(center);
+        }
+        else
+        {
+            // IMPORTANT: Celestia relies on this calculation being peformed at double
+            // precision. Simply converting center to single precision is NOT an
+            // allowable optimization.
+            distanceToPlane = plane.template cast<PREC>().signedDistance(center);
+        }
+
+        if (distanceToPlane < -radius)
+            return FrustumAspect::Outside;
+        if (distanceToPlane <= radius)
+            isIntersecting = true;
+    }
+
+    return isIntersecting ? FrustumAspect::Intersect : FrustumAspect::Inside;
+}
+
+} // end unnamed namespace
+
+Frustum::Frustum(float fov, float aspectRatio, float n, float f)
+{
+    init(planes.data(), fov, aspectRatio, n);
+    planes[FarIdx] = createFarPlane(f);
+}
+
+Frustum::Frustum(float l, float r, float t, float b, float n, float f)
+{
+    init(planes.data(), l, r, t, b, n);
+    planes[FarIdx] = createFarPlane(f);
+}
+
+void
+Frustum::transform(const Eigen::Matrix3f& m)
+{
+    doTransform(planes.data(), nPlanes, m);
+}
+
+void
+Frustum::transform(const Eigen::Matrix4f& m)
+{
+    doTransform(planes.data(), nPlanes, m);
+}
+
+FrustumAspect
+Frustum::test(const Eigen::Vector3f& point) const
+{
+    return doTest(planes, point);
+}
+
+FrustumAspect
+Frustum::testSphere(const Eigen::Vector3f& center, float radius) const
+{
+    return doTestSphere(planes, center, radius);
+}
+
+/** Double precision version of testSphere()
+  */
+FrustumAspect
+Frustum::testSphere(const Eigen::Vector3d& center, double radius) const
+{
+    return doTestSphere(planes, center, radius);
+}
+
+InfiniteFrustum::InfiniteFrustum(float fov, float aspectRatio, float n)
+{
+    init(planes.data(), fov, aspectRatio, n);
+}
+
+void
+InfiniteFrustum::transform(const Eigen::Matrix3f& m)
+{
+    doTransform(planes.data(), nPlanes, m);
+}
+
+void
+InfiniteFrustum::transform(const Eigen::Matrix4f& m)
+{
+    doTransform(planes.data(), nPlanes, m);
+}
+
+FrustumAspect
+InfiniteFrustum::test(const Eigen::Vector3f& point) const
+{
+    return doTest(planes, point);
+}
+
+FrustumAspect
+InfiniteFrustum::testSphere(const Eigen::Vector3f& center, float radius) const
+{
+    return doTestSphere(planes, center, radius);
+}
+
+/** Double precision version of testSphere()
+  */
+FrustumAspect
+InfiniteFrustum::testSphere(const Eigen::Vector3d& center, double radius) const
+{
+    return doTestSphere(planes, center, radius);
 }
 
 }

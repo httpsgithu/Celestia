@@ -9,45 +9,56 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_STARCOLORS_H_
-#define _CELENGINE_STARCOLORS_H_
+#pragma once
 
+#include <cmath>
+#include <cstddef>
+#include <vector>
+
+#include <Eigen/Core>
+
+#include <celmath/vecgl.h>
 #include <celutil/color.h>
 
+enum class ColorTableType
+{
+    Enhanced = 0,
+    Blackbody_D65 = 1,
+    SunWhite = 2,
+    VegaWhite = 3,
+};
 
 class ColorTemperatureTable
 {
  public:
-    ColorTemperatureTable(Color* _colors,
-                          unsigned int _nColors,
-                          float maxTemp) :
-        colors(_colors),
-        nColors(_nColors),
-        tempScale((float) (_nColors - 1) / maxTemp)
-    {};
+    explicit ColorTemperatureTable(ColorTableType _type);
 
     Color lookupColor(float temp) const
     {
-        unsigned int colorTableIndex = (unsigned int) (temp * tempScale);
-        if (colorTableIndex >= nColors)
-            return colors[nColors - 1];
+        auto colorTableIndex = static_cast<std::size_t>(std::nearbyint(temp * tempScale));
+        if (colorTableIndex >= colors.size())
+            return colors.back();
         else
             return colors[colorTableIndex];
     }
 
+    Color lookupTintColor(float temp, float saturation, float fadeFactor) const
+    {
+        Eigen::Vector3f color = celestia::math::mix(Eigen::Vector3f::Ones(),
+                                                    lookupColor(temp).toVector3(),
+                                                    saturation) * fadeFactor;
+        return Color(color);
+    }
+
+    ColorTableType type() const
+    {
+        return tableType;
+    }
+
+    bool setType(ColorTableType _type);
+
  private:
-    const Color* colors;
-    unsigned nColors;
+    std::vector<Color> colors{ };
     float tempScale;
+    ColorTableType tableType;
 };
-
-enum ColorTableType
-{
-    ColorTable_Enhanced,
-    ColorTable_Blackbody_D65,
-};
-
-extern ColorTemperatureTable* GetStarColorTable(ColorTableType);
-
-
-#endif // _CELENGINE_STARCOLORS_H_

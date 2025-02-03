@@ -10,13 +10,14 @@
  *  $Id: actions.h,v 1.7 2008-01-21 04:55:19 suwalski Exp $
  */
 
-#ifndef GTK_ACTIONS_H
-#define GTK_ACTIONS_H
+#pragma once
 
 #include <gtk/gtk.h>
 
 #include "common.h"
 
+namespace celestia::gtk
+{
 
 /* Main Actions */
 void actionCopyURL(GtkAction*, AppData*);
@@ -96,6 +97,7 @@ void actionRenderMinorMoons(GtkToggleAction*, AppData*);
 void actionRenderAsteroids(GtkToggleAction*, AppData*);
 void actionRenderComets(GtkToggleAction*, AppData*);
 void actionRenderSpacecrafts(GtkToggleAction*, AppData*);
+void actionRenderPlanetRings(GtkToggleAction*, AppData*);
 void actionRenderRingShadows(GtkToggleAction*, AppData*);
 void actionRenderStars(GtkToggleAction*, AppData*);
 
@@ -133,13 +135,7 @@ void resyncStarStyleActions(AppData* app);
 void resyncGalaxyGainActions(AppData* app);
 void resyncTextureResolutionActions(AppData* app);
 
-
 /* Information for the about box */
-#ifdef GNOME
-#define FRONTEND "GNOME"
-#else
 #define FRONTEND "GTK+"
-#endif
 
-
-#endif /* GTK_ACTIONS_H */
+} // end namespace celestia::gtk

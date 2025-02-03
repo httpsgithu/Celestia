@@ -1,6 +1,6 @@
 // truetypefont.h
 //
-// Copyright (C) 2019, Celestia Development Team
+// Copyright (C) 2019-2022, Celestia Development Team
 //
 // This program is free software; you can redistribute it and/or
 // modify it under the terms of the GNU General Public License
@@ -9,51 +9,58 @@
 
 #pragma once
 
-#include <string>
-#include <celcompat/filesystem.h>
+#include <memory>
+#include <string_view>
+
 #include <Eigen/Core>
 
+#include <celcompat/filesystem.h>
+
+
 class Renderer;
+class TextureFont;
+
+std::shared_ptr<TextureFont>
+LoadTextureFont(const Renderer *, const fs::path &, int index = 0, int size = 0);
+
+fs::path
+ParseFontName(const fs::path &, int &, int &);
 
 struct TextureFontPrivate;
 class TextureFont
 {
-    TextureFont(const Renderer*);
- public:
+public:
+    constexpr static int kDefaultSize = 12;
+
+    TextureFont(const Renderer *);
     TextureFont() = delete;
     ~TextureFont();
-    TextureFont(const TextureFont&) = delete;
-    TextureFont(TextureFont&&) = delete;
-    TextureFont& operator=(const TextureFont&) = delete;
-    TextureFont& operator=(TextureFont&&) = delete;
+    TextureFont(const TextureFont &) = delete;
+    TextureFont(TextureFont &&)      = default;
+    TextureFont &operator=(const TextureFont &) = delete;
+    TextureFont &operator=(TextureFont &&) = default;
 
-    void setMVPMatrices(const Eigen::Matrix4f& p, const Eigen::Matrix4f& m = Eigen::Matrix4f::Identity());
+    void setMVPMatrices(const Eigen::Matrix4f &p,
+                        const Eigen::Matrix4f &m = Eigen::Matrix4f::Identity());
 
-    float render(wchar_t c, float xoffset = 0.0f, float yoffset = 0.0f) const;
-    float render(const std::string& str, float xoffset = 0.0f, float yoffset = 0.0f) const;
+    std::pair<float, float> render(std::u16string_view line, float xoffset = 0.0f, float yoffset = 0.0f) const;
 
-    int getWidth(const std::string&) const;
-    int getWidth(int c) const;
+    int getWidth(std::u16string_view) const;
     int getMaxWidth() const;
     int getHeight() const;
 
-    int getMaxAscent() const;
+    int  getMaxAscent() const;
     void setMaxAscent(int);
-    int getMaxDescent() const;
+    int  getMaxDescent() const;
     void setMaxDescent(int);
 
-    short getAdvance(wchar_t c) const;
-
-    int getTextureName() const;
     void bind();
     void unbind();
-    bool buildTexture();
     void flush();
 
-    static TextureFont* load(const Renderer*, const fs::path&, int index, int size, int dpi);
+private:
+    std::unique_ptr<TextureFontPrivate> impl;
 
- private:
-    TextureFontPrivate *impl;
+    friend std::shared_ptr<TextureFont>
+    LoadTextureFont(const Renderer*, const fs::path&, int, int);
 };
-
-std::shared_ptr<TextureFont> LoadTextureFont(const Renderer*, const fs::path&, int index = 0, int size = 0);

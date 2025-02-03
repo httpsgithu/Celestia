@@ -10,10 +10,14 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <config.h>
+#include <config.h> // HAVE_WORDEXP
+#include <array>
+#include <cctype>
 #include <fstream>
-#include <fmt/printf.h>
+#include <utility>
+#include <fmt/format.h>
 #include "gettext.h"
+#include "logger.h"
 #ifdef _WIN32
 #include <shlobj.h>
 #include "winutil.h"
@@ -29,24 +33,75 @@
 #endif // !_WIN32
 #include "fsutils.h"
 
-using namespace std;
+#ifndef PATH_MAX
+#define PATH_MAX 260
+#endif
 
-namespace celestia
+namespace celestia::util
 {
-namespace util
+
+std::optional<fs::path>
+U8FileName(std::string_view source, bool allowWildcardExtension)
 {
+    using namespace std::string_view_literals;
+
+    // Windows: filenames cannot end with . or space
+    if (source.empty() || source.back() == '.' || source.back() == ' ')
+        return std::nullopt;
+
+    // Various characters disallowed in Windows filenames
+    constexpr std::string_view badChars = R"("/:<>?\|)"sv;
+    const auto lastPos = source.size() - 1;
+    for (std::string_view::size_type i = 0; i < source.size(); ++i)
+    {
+        char ch = source[i];
+        // Windows (and basic politeness) disallows all control characters
+        // Only allow * as extension .* at the end of the name
+        if (ch < ' ' || badChars.find(ch) != std::string_view::npos ||
+            (ch == '*' && !(allowWildcardExtension && i == lastPos && i > 0 && source[i - 1] == '.')))
+        {
+            return std::nullopt;
+        }
+    }
+
+    // Disallow reserved Windows device names
+    if (std::string_view stem = source.substr(0, source.rfind('.'));
+        stem.size() >= 3 && stem.size() <= 5)
+    {
+        std::array<char, 5> buffer{ '\0', '\0', '\0', '\0', '\0' };
+        stem.copy(buffer.data(), 5);
+        for (std::size_t i = 0; i < stem.size(); ++i)
+        {
+            buffer[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(buffer[i])));
+        }
+
+        stem = std::string_view(buffer.data(), stem.size());
+        if (stem == "CON"sv || stem == "PRN"sv || stem == "AUX"sv || stem == "NUL"sv)
+            return std::nullopt;
+
+        constexpr std::string_view superscriptTrailBytes = "\xb2\xb3\xb9"sv;
+
+        // COM or LPT followed by digits 0-9 or superscript digits 1-3
+        if ((stem.substr(0, 3) == "COM"sv || stem.substr(0, 3) == "LPT"sv) &&
+            ((stem.size() == 4 && stem[3] >= '0' && stem[3] <= '9') ||
+             (stem.size() == 5 && stem[3] == '\xc2' &&
+              superscriptTrailBytes.find(stem[4]) != std::string_view::npos)))
+        {
+            return std::nullopt;
+        }
+    }
+
+    return fs::u8path(source);
+}
 
 fs::path LocaleFilename(const fs::path &p)
 {
-    fs::path::string_type format, lang;
-#ifdef _WIN32
-    format = L"%s_%s%s";
-    lang = CurrentCPToWide(_("LANGUAGE"));
-#else
-    format = "%s_%s%s";
-    lang = _("LANGUAGE");
-#endif
-    fs::path locPath = p.parent_path() / fmt::sprintf(format, p.stem().native(), lang, p.extension().native());
+    const char *orig = N_("LANGUAGE");
+    const char *lang = _(orig);
+    if (lang == orig)
+        return p;
+
+    fs::path locPath = p.parent_path() / p.stem().concat("_").concat(lang).replace_extension(p.extension());
 
     std::error_code ec;
     if (fs::exists(locPath, ec))
@@ -60,20 +115,21 @@ fs::path LocaleFilename(const fs::path &p)
 }
 
 
-fs::path PathExp(const fs::path& filename)
+fs::path PathExp(fs::path&& filename)
 {
-#ifndef PORTABLE_BUILD
-#ifdef _WIN32
-    auto str = filename.native();
-    if (str[0] == '~')
+#ifdef PORTABLE_BUILD
+    return std::move(filename);
+#elif defined(_WIN32)
+    const auto& str = filename.native();
+    if (str[0] == L'~')
     {
         if (str.size() == 1)
             return HomeDir();
-        if (str[1] == '\\' || str[1] == '/')
+        if (str[1] == L'\\' || str[1] == L'/')
             return HomeDir() / str.substr(2);
     }
 
-    return filename;
+    return std::move(filename);
 #elif defined(HAVE_WORDEXP)
     wordexp_t result;
 
@@ -86,65 +142,79 @@ fs::path PathExp(const fs::path& filename)
         // then perhaps part of the result was allocated.
         wordfree(&result);
     default: // some other error
-        return filename;
+        return std::move(filename);
     }
 
     if (result.we_wordc != 1)
     {
         wordfree(&result);
-        return filename;
+        return std::move(filename);
     }
 
     fs::path::string_type expanded(result.we_wordv[0]);
     wordfree(&result);
     return expanded;
-#endif
-    return filename;
-#else // !PORTABLE_BUILD
-    return filename;
+#else
+    return std::move(filename);
 #endif
 }
 
 fs::path ResolveWildcard(const fs::path& wildcard,
-                         array_view<const char*> extensions)
+                         array_view<std::string_view> extensions)
 {
     fs::path filename(wildcard);
 
-    for (const auto *ext : extensions)
+    for (std::string_view ext : extensions)
     {
         filename.replace_extension(ext);
-        ifstream in(filename.string());
-        if (in.good())
+        if (fs::exists(filename))
             return filename;
     }
 
     return fs::path();
 }
 
+bool IsValidDirectory(const fs::path& dir)
+{
+    if (dir.empty())
+        return false;
+
+    if (std::error_code ec; !fs::is_directory(dir, ec))
+    {
+        GetLogger()->error(_("Path {} doesn't exist or isn't a directory\n"), dir);
+        return false;
+    }
+
+    return true;
+}
+
 #ifndef PORTABLE_BUILD
 fs::path HomeDir()
 {
 #ifdef _WIN32
-    wstring p(MAX_PATH + 1, 0);
+    wchar_t p[MAX_PATH + 1];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PROFILE, nullptr, 0, &p[0])))
         return fs::path(p);
 
     // fallback to environment variables
-    const auto *s = _wgetenv(L"USERPROFILE"); // FIXME: rewrite using _wgetenv_s
-    if (s != nullptr)
-        return fs::path(s);
+    std::size_t size;
+    _wgetenv_s(&size, p, L"USERPROFILE");
+    if (size != 0)
+        return fs::path(p);
 
-    auto *s1 = _wgetenv(L"HOMEDRIVE");
-    auto *s2 = _wgetenv(L"HOMEPATH");
-    if (s1 != nullptr && s2 != nullptr)
+    _wgetenv_s(&size, p, L"HOMEDRIVE");
+    if (size != 0)
     {
-        return fs::path(s1) / fs::path(s2);
+        fs::path ret(p);
+        _wgetenv_s(&size, p, L"HOMEPATH");
+        if (size != 0)
+            return ret / fs::path(p);
     }
 
     // unlikely this is defined in woe but let's check
-    s = _wgetenv(L"HOME");
-    if (s != nullptr)
-        return fs::path(s);
+    _wgetenv_s(&size, p, L"HOME");
+    if (size != 0)
+        return fs::path(p);
 #elif defined(__APPLE__)
     return AppleHomeDirectory();
 #else
@@ -152,11 +222,11 @@ fs::path HomeDir()
     if (home != nullptr)
         return home;
 
-    // FIXME: rewrite using getpwuid_r
-    struct passwd *pw = getpwuid(geteuid());
-    home = pw->pw_dir;
-    if (home != nullptr)
-        return home;
+    struct passwd pw, *result = nullptr;
+    char pw_dir[PATH_MAX];
+    getpwuid_r(geteuid(), &pw, pw_dir, sizeof(pw_dir), &result);
+    if (result != nullptr)
+        return pw_dir;
 #endif
 
     return fs::path();
@@ -165,14 +235,17 @@ fs::path HomeDir()
 fs::path WriteableDataPath()
 {
 #if defined(_WIN32)
-    char s[MAX_PATH + 1];
-    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_APPDATA, nullptr, 0, &s[0])))
-        return PathExp(s) / "Celestia";
+    wchar_t p[MAX_PATH + 1];
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, &p[0])))
+        return PathExp(p) / "Celestia";
 
     // fallback to environment variables
-    const char *p = getenv("APPDATA");
-    p = p != nullptr ? p : "~\\AppData\\Roaming";
-    return PathExp(p) / "Celestia";
+    std::size_t size;
+    _wgetenv_s(&size, p, L"APPDATA");
+    if (size != 0)
+        return PathExp(p) / "Celestia";
+
+    return PathExp("~\\AppData\\Roaming") / "Celestia";
 
 #elif defined(__APPLE__)
     return PathExp(AppleApplicationSupportDirectory()) / "Celestia";
@@ -185,5 +258,4 @@ fs::path WriteableDataPath()
 }
 #endif // !PORTABLE_BUILD
 
-}
-}
+} // end namespace celestia::util

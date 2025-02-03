@@ -7,24 +7,25 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_GLSHADER_H_
-#define _CELENGINE_GLSHADER_H_
+#pragma once
 
-#include <Eigen/Core>
+#include <iosfwd>
 #include <string>
 #include <vector>
-#include <iostream>
+
+#include <Eigen/Core>
+
 #include "glsupport.h"
 
 class GLShaderLoader;
 
-enum GLShaderStatus
+enum class GLShaderStatus
 {
-    ShaderStatus_OK,
-    ShaderStatus_CompileError,
-    ShaderStatus_LinkError,
-    ShaderStatus_OutOfMemory,
-    ShaderStatus_EmptyProgram,
+    OK,
+    CompileError,
+    LinkError,
+    OutOfMemory,
+    EmptyProgram,
 };
 
 class GLShader
@@ -49,6 +50,15 @@ class GLVertexShader : public GLShader
 {
  private:
     GLVertexShader(GLuint _id) : GLShader(_id) {};
+
+ friend class GLShaderLoader;
+};
+
+
+class GLGeometryShader : public GLShader
+{
+ private:
+    GLGeometryShader(GLuint _id) : GLShader(_id) {};
 
  friend class GLShaderLoader;
 };
@@ -88,86 +98,102 @@ class GLProgram
 class FloatShaderParameter
 {
  public:
-    FloatShaderParameter();
+    FloatShaderParameter() = default;
     FloatShaderParameter(GLuint obj, const char* name);
 
     FloatShaderParameter& operator=(float);
 
  private:
-    int slot;
+    int slot{ -1 };
+};
+
+
+class Vec2ShaderParameter
+{
+ public:
+    Vec2ShaderParameter() = default;
+    Vec2ShaderParameter(GLuint obj, const char* name);
+
+    Vec2ShaderParameter& operator=(const Eigen::Vector2f&);
+
+ private:
+    int slot{ -1 };
 };
 
 
 class Vec3ShaderParameter
 {
  public:
-    Vec3ShaderParameter();
+    Vec3ShaderParameter() = default;
     Vec3ShaderParameter(GLuint obj, const char* name);
 
     Vec3ShaderParameter& operator=(const Eigen::Vector3f&);
 
  private:
-    int slot;
+    int slot{ -1 };
 };
 
 
 class Vec4ShaderParameter
 {
  public:
-    Vec4ShaderParameter();
+    Vec4ShaderParameter() = default;
     Vec4ShaderParameter(GLuint obj, const char* name);
 
     Vec4ShaderParameter& operator=(const Eigen::Vector4f&);
 
  private:
-    int slot;
+    int slot{ -1 };
 };
 
 
 class IntegerShaderParameter
 {
  public:
-    IntegerShaderParameter();
+    IntegerShaderParameter() = default;
     IntegerShaderParameter(GLuint obj, const char* name);
 
     IntegerShaderParameter& operator=(int);
 
  private:
-    int slot;
+    int slot{ -1 };
 };
 
 
 class Mat3ShaderParameter
 {
  public:
-    Mat3ShaderParameter();
+    Mat3ShaderParameter() = default;
     Mat3ShaderParameter(GLuint obj, const char* name);
 
     Mat3ShaderParameter& operator=(const Eigen::Matrix3f&);
 
  private:
-    int slot;
+    int slot{ -1 };
 };
 
 
 class Mat4ShaderParameter
 {
  public:
-    Mat4ShaderParameter();
+    Mat4ShaderParameter() = default;
     Mat4ShaderParameter(GLuint obj, const char* name);
 
     Mat4ShaderParameter& operator=(const Eigen::Matrix4f&);
 
  private:
-    int slot;
+    int slot{ -1 };
 };
 
 
 class GLShaderLoader
 {
  public:
+    explicit GLShaderLoader() = delete;
     static GLShaderStatus CreateVertexShader(const std::vector<std::string>&,
                                              GLVertexShader**);
+    static GLShaderStatus CreateGeometryShader(const std::vector<std::string>&,
+                                               GLGeometryShader**);
     static GLShaderStatus CreateFragmentShader(const std::vector<std::string>&,
                                                GLFragmentShader**);
     static GLShaderStatus CreateVertexShader(const std::string&,
@@ -178,15 +204,25 @@ class GLShaderLoader
     static GLShaderStatus CreateProgram(const GLVertexShader& vs,
                                         const GLFragmentShader& fs,
                                         GLProgram**);
+    static GLShaderStatus CreateProgram(const GLVertexShader& vs,
+                                        const GLGeometryShader& gs,
+                                        const GLFragmentShader& fs,
+                                        GLProgram**);
     static GLShaderStatus CreateProgram(const std::vector<std::string>& vs,
+                                        const std::vector<std::string>& fs,
+                                        GLProgram**);
+    static GLShaderStatus CreateProgram(const std::vector<std::string>& vs,
+                                        const std::vector<std::string>& gs,
                                         const std::vector<std::string>& fs,
                                         GLProgram**);
     static GLShaderStatus CreateProgram(const std::string& vsSource,
                                         const std::string& fsSource,
                                         GLProgram**);
+    static GLShaderStatus CreateProgram(const std::string& vsSource,
+                                        const std::string& fsSource,
+                                        const std::string& gsSource,
+                                        GLProgram**);
 };
 
 
 extern std::ostream* g_shaderLogFile;
-
-#endif // _CELENGINE_GLSHADER_H_

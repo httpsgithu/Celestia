@@ -9,19 +9,82 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <celutil/debug.h>
+#include <cstddef>
+#include <string_view>
 
+#include <fmt/format.h>
+
+#include <celengine/value.h>
 #include "scriptobject.h"
 
-using namespace std;
+using namespace std::string_view_literals;
 
+namespace celestia::ephem
+{
+
+namespace
+{
+
+class ScriptObjectState
+{
+private:
+    lua_State* context{ nullptr };
+    unsigned int nameIndex{ 1 };
+
+public:
+    lua_State* getContext() { return context; }
+    void setContext(lua_State* luaState) { context = luaState; }
+    unsigned int getNameIndex() { return nameIndex++; }
+};
 
 // global script context for scripted orbits and rotations
-static lua_State* scriptObjectLuaState = NULL;
 
-static const char* ScriptedObjectNamePrefix = "cel_script_object_";
-static unsigned int ScriptedObjectNameIndex = 1;
+constexpr std::string_view ScriptedObjectNamePrefix = "cel_script_object_"sv;
 
+ScriptObjectState* getCurrentObjectState()
+{
+    static ScriptObjectState* const state = std::make_unique<ScriptObjectState>().release();
+    return state;
+}
+
+class HashVisitor
+{
+private:
+    lua_State* state;
+
+public:
+    explicit HashVisitor(lua_State* pState) : state{pState} {}
+
+    void operator()(const std::string& key, const Value& value)
+    {
+        std::size_t percentPos = key.find('%');
+        if (percentPos == std::string::npos)
+        {
+            switch (value.getType())
+            {
+            case ValueType::NumberType:
+                lua_pushstring(state, key.c_str());
+                lua_pushnumber(state, *value.getNumber());
+                lua_settable(state, -3);
+                break;
+            case ValueType::StringType:
+                lua_pushstring(state, key.c_str());
+                lua_pushstring(state, value.getString()->c_str());
+                lua_settable(state, -3);
+                break;
+            case ValueType::BooleanType:
+                lua_pushstring(state, key.c_str());
+                lua_pushboolean(state, *value.getBoolean());
+                lua_settable(state, -3);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+};
+
+} // end unnamed namespace
 
 /*! Set the script context for ScriptedOrbits and ScriptRotations
  *  Should be called just once at initialization.
@@ -29,7 +92,7 @@ static unsigned int ScriptedObjectNameIndex = 1;
 void
 SetScriptedObjectContext(lua_State* l)
 {
-    scriptObjectLuaState = l;
+    getCurrentObjectState()->setContext(l);
 }
 
 
@@ -38,20 +101,18 @@ SetScriptedObjectContext(lua_State* l)
 lua_State*
 GetScriptedObjectContext()
 {
-    return scriptObjectLuaState;
+    return getCurrentObjectState()->getContext();
 }
 
 
 /*! Generate a unique name for this script orbit object so that
  * we can refer to it later.
  */
-string
+std::string
 GenerateScriptObjectName()
 {
-    string buf;
-    buf = fmt::sprintf("%s%u", ScriptedObjectNamePrefix, ScriptedObjectNameIndex);
-    ScriptedObjectNameIndex++;
-
+    std::string buf;
+    buf = fmt::format("{}{}", ScriptedObjectNamePrefix, getCurrentObjectState()->getNameIndex());
     return buf;
 }
 
@@ -62,7 +123,7 @@ GenerateScriptObjectName()
 void
 GetLuaTableEntry(lua_State* state,
                  int tableIndex,
-                 const string& key)
+                 const std::string& key)
 {
     lua_pushvalue(state, tableIndex);
     lua_pushstring(state, key.c_str());
@@ -77,7 +138,7 @@ GetLuaTableEntry(lua_State* state,
 double
 SafeGetLuaNumber(lua_State* state,
                  int tableIndex,
-                 const string& key,
+                 const std::string& key,
                  double defaultValue)
 {
     double v = defaultValue;
@@ -96,33 +157,10 @@ SafeGetLuaNumber(lua_State* state,
  *  only number, string, and boolean values are converted.
  */
 void
-SetLuaVariables(lua_State* state, Hash* parameters)
+SetLuaVariables(lua_State* state, const AssociativeArray& parameters)
 {
-    for (const auto& param : *parameters)
-    {
-        size_t percentPos = param.first.find('%');
-        if (percentPos == string::npos)
-        {
-            switch (param.second->getType())
-            {
-            case Value::NumberType:
-                lua_pushstring(state, param.first.c_str());
-                lua_pushnumber(state, param.second->getNumber());
-                lua_settable(state, -3);
-                break;
-            case Value::StringType:
-                lua_pushstring(state, param.first.c_str());
-                lua_pushstring(state, param.second->getString().c_str());
-                lua_settable(state, -3);
-                break;
-            case Value::BooleanType:
-                lua_pushstring(state, param.first.c_str());
-                lua_pushboolean(state, param.second->getBoolean());
-                lua_settable(state, -3);
-                break;
-            default:
-                break;
-            }
-        }
-    }
+    HashVisitor visitor(state);
+    parameters.for_all(visitor);
 }
+
+} // end namespace celestia::ephem

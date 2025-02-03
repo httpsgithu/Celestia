@@ -12,10 +12,14 @@
 
 #include <map>
 #include <string>
+#include <string_view>
+
 #include <Eigen/Geometry>
+
+#include <celastro/date.h>
 #include <celengine/observer.h>
-#include <celengine/astro.h>
-#include <celcompat/string_view.h>
+#include <celengine/selection.h>
+
 #include "celestiastate.h"
 
 class CelestiaCore;
@@ -23,8 +27,6 @@ class CelestiaCore;
 class Url
 {
  public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     constexpr static int CurrentVersion = 3;
 
     /*! The TimeSource specifies what the time will be set to when the user
@@ -49,13 +51,12 @@ class Url
         int version = CurrentVersion,
         TimeSource timeSource = UseUrlTime);
     Url(const Url&) = default;
-    Url(Url&&) = default;
+    Url(Url&&) noexcept = default;
     Url& operator=(const Url&) = default;
-    Url& operator=(Url&&) = default;
+    Url& operator=(Url&&) noexcept = default;
     ~Url() = default;
 
     static std::string getEncodedObjectName(const Selection& sel, const CelestiaCore* appCore);
-    static constexpr std::string_view proto();
     static std::string decodeString(std::string_view);
     static std::string encodeString(std::string_view);
 
@@ -64,29 +65,22 @@ class Url
     std::string getAsString() const;
 
  private:
-    bool initVersion3(std::map<std::string_view, std::string> &params, std::string_view timeStr);
+    bool initVersion3(const std::map<std::string_view, std::string> &params, std::string_view timeStr);
     bool initVersion4(std::map<std::string_view, std::string> &params, std::string_view timeStr);
-    void evalName();
 
-    CelestiaState   m_state;
+    CelestiaState          m_state;
 
-    std::string     m_url;
-    std::string     m_name;
-    astro::Date     m_date;
-    CelestiaCore   *m_appCore       { nullptr };
+    std::string            m_url;
+    celestia::astro::Date  m_date;
+    CelestiaCore          *m_appCore       { nullptr };
 
-    ObserverFrame   m_ref;
-    Selection       m_selected;
-    Selection       m_tracked;
+    ObserverFrame          m_ref;
+    Selection              m_selected;
+    Selection              m_tracked;
 
-    int             m_version       { CurrentVersion };
-    TimeSource      m_timeSource    { UseUrlTime };
+    int                    m_version       { CurrentVersion };
+    TimeSource             m_timeSource    { UseUrlTime };
 
-    int             m_nBodies       { -1 };
-    bool            m_valid         { false };
+    int                    m_nBodies       { -1 };
+    bool                   m_valid         { false };
 };
-
-constexpr std::string_view Url::proto()
-{
-    return "cel://";
-}

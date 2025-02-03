@@ -9,19 +9,27 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <iostream>
-#include <cstdio>
 #include <utility>
-#include "SpiceUsr.h"
-#include <celengine/astro.h>
-#include "spiceorbit.h"
+
+#include <SpiceUsr.h>
+
+#include <celastro/date.h>
+#include <celutil/logger.h>
 #include "spiceinterface.h"
+#include "spiceorbit.h"
 
-using namespace Eigen;
-using namespace std;
+using celestia::util::GetLogger;
 
 
-static const double MILLISEC = astro::secsToDays(0.001);
+namespace celestia::ephem
+{
+
+namespace
+{
+
+constexpr double MILLISEC = astro::secsToDays(0.001);
+
+} // end unnamed namespace
 
 /*! Create a new SPICE orbit using with a valid interval specified
  *  by beginning and ending.
@@ -85,34 +93,32 @@ SpiceOrbit::getPeriod() const
 
 
 bool
-SpiceOrbit::init(const fs::path& path,
-                 const list<string>* requiredKernels)
+SpiceOrbit::loadRequiredKernel(const fs::path& path, const std::string& kernel)
 {
-    // Load required kernel files
-    if (requiredKernels != nullptr)
-    {
-        for (const auto& kernel : *requiredKernels)
-        {
-            fs::path filepath = path / "data" / kernel;
-            if (!LoadSpiceKernel(filepath))
-            {
-                spiceErr = true;
-                break;
-            }
-        }
-    }
+    // Load required kernel file
+    fs::path filepath = path / "data" / kernel;
+    if (LoadSpiceKernel(filepath))
+        return true;
 
+    spiceErr = true;
+    return false;
+}
+
+
+bool
+SpiceOrbit::init()
+{
     // Get the ID codes for the target
     if (!GetNaifId(targetBodyName, &targetID))
     {
-        clog << "Couldn't find SPICE ID for " << targetBodyName << "\n";
+        GetLogger()->error("Couldn't find SPICE ID for {}\n", targetBodyName);
         spiceErr = true;
         return false;
     }
 
     if (!GetNaifId(originName, &originID))
     {
-        clog << "Couldn't find SPICE ID for " << originName << "\n";
+        GetLogger()->error("Couldn't find SPICE ID for {}", originName);
         spiceErr = true;
         return false;
     }
@@ -151,7 +157,7 @@ SpiceOrbit::init(const fs::path& path,
     SpiceInt nIntervals = card_c(&targetCoverage) / 2;
     if (nIntervals <= 0 && targetID != 0)
     {
-        clog << "Couldn't find object " << targetBodyName << " in SPICE kernel pool.\n";
+        GetLogger()->error("Couldn't find object {} in SPICE kernel pool.\n", targetBodyName);
         spiceErr = true;
         if (failed_c())
         {
@@ -202,7 +208,7 @@ SpiceOrbit::init(const fs::path& path,
         if (targetID != 0 &&
             !wnincd_c(beginningSecondsJ2000, endingSecondsJ2000, &targetCoverage))
         {
-            clog << "Specified time interval for target " << targetBodyName << " not available.\n";
+            GetLogger()->error("Specified time interval for target {} not available.\n", targetBodyName);
             return false;
         }
     }
@@ -222,7 +228,7 @@ SpiceOrbit::init(const fs::path& path,
         // Print the error message
         char errMsg[1024];
         getmsg_c("long", sizeof(errMsg), errMsg);
-        clog << errMsg << "\n";
+        GetLogger()->error("{}\n", errMsg);
         spiceErr = true;
 
         reset_c();
@@ -232,7 +238,7 @@ SpiceOrbit::init(const fs::path& path,
 }
 
 
-Vector3d
+Eigen::Vector3d
 SpiceOrbit::computePosition(double jd) const
 {
     if (jd < validIntervalBegin)
@@ -242,7 +248,7 @@ SpiceOrbit::computePosition(double jd) const
 
     if (spiceErr)
     {
-        return Vector3d::Zero();
+        return Eigen::Vector3d::Zero();
     }
     else
     {
@@ -265,19 +271,19 @@ SpiceOrbit::computePosition(double jd) const
             // Print the error message
             char errMsg[1024];
             getmsg_c("long", sizeof(errMsg), errMsg);
-            clog << errMsg << "\n";
+            GetLogger()->warn("{}\n", errMsg);
 
             // Reset the error state
             reset_c();
         }
 
         // Transform into Celestia's coordinate system
-        return Vector3d(position[0], position[2], -position[1]);
+        return Eigen::Vector3d(position[0], position[2], -position[1]);
     }
 }
 
 
-Vector3d
+Eigen::Vector3d
 SpiceOrbit::computeVelocity(double jd) const
 {
     if (jd < validIntervalBegin)
@@ -287,7 +293,7 @@ SpiceOrbit::computeVelocity(double jd) const
 
     if (spiceErr)
     {
-        return Vector3d::Zero();
+        return Eigen::Vector3d::Zero();
     }
     else
     {
@@ -310,7 +316,7 @@ SpiceOrbit::computeVelocity(double jd) const
             // Print the error message
             char errMsg[1024];
             getmsg_c("long", sizeof(errMsg), errMsg);
-            clog << errMsg << "\n";
+            GetLogger()->warn("{}\n", errMsg);
 
             // Reset the error state
             reset_c();
@@ -318,7 +324,7 @@ SpiceOrbit::computeVelocity(double jd) const
 
         // Transform into Celestia's coordinate system, and from km/s to km/day
         double d2s = astro::daysToSecs(1.0);
-        return Vector3d(state[3] * d2s, state[5] * d2s, -state[4] * d2s);
+        return Eigen::Vector3d(state[3] * d2s, state[5] * d2s, -state[4] * d2s);
     }
 }
 
@@ -327,4 +333,6 @@ void SpiceOrbit::getValidRange(double& begin, double& end) const
 {
     begin = validIntervalBegin;
     end = validIntervalEnd;
+}
+
 }

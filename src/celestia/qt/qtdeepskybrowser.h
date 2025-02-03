@@ -10,35 +10,37 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTDEEPSKYBROWSER_H_
-#define _QTDEEPSKYBROWSER_H_
+#pragma once
 
 #include <QWidget>
-#include "celengine/selection.h"
 
-class QAbstractItemModel;
-class QItemSelection;
-class QTreeView;
-class QRadioButton;
-class QComboBox;
 class QCheckBox;
+class QComboBox;
+class QItemSelection;
 class QLabel;
 class QLineEdit;
-class ColorSwatchWidget;
-class CelestiaCore;
-class InfoPanel;
+class QPoint;
+class QRadioButton;
+class QTreeView;
 
-class DSOTableModel;
+class CelestiaCore;
+class Selection;
+
+namespace celestia::qt
+{
+
+class ColorSwatchWidget;
+class InfoPanel;
 
 class DeepSkyBrowser : public QWidget
 {
-Q_OBJECT
+    Q_OBJECT
 
- public:
+public:
     DeepSkyBrowser(CelestiaCore* _appCore, QWidget* parent, InfoPanel* infoPanel);
     ~DeepSkyBrowser() = default;
 
- public slots:
+public slots:
     void slotRefreshTable();
     void slotContextMenu(const QPoint& pos);
     void slotMarkSelected();
@@ -46,10 +48,12 @@ Q_OBJECT
     void slotClearMarkers();
     void slotSelectionChanged(const QItemSelection& newSel, const QItemSelection& oldSel);
 
- signals:
+signals:
     void selectionContextMenuRequested(const QPoint& pos, Selection& sel);
 
- private:
+private:
+    class DSOTableModel;
+
     CelestiaCore* appCore;
 
     DSOTableModel* dsoModel{nullptr};
@@ -57,10 +61,10 @@ Q_OBJECT
 
     QLabel* searchResultLabel{nullptr};
 
-    QCheckBox* globularsButton{nullptr};
-    QCheckBox* galaxiesButton{nullptr};
-    QCheckBox* nebulaeButton{nullptr};
-    QCheckBox* openClustersButton{nullptr};
+    QRadioButton* globularsButton{nullptr};
+    QRadioButton* galaxiesButton{nullptr};
+    QRadioButton* nebulaeButton{nullptr};
+    QRadioButton* openClustersButton{nullptr};
 
     QLineEdit* objectTypeFilterBox{nullptr};
 
@@ -73,4 +77,4 @@ Q_OBJECT
     InfoPanel* infoPanel{nullptr};
 };
 
-#endif // _QTDEEPSKYBROWSER_H_
+} // end namespace celestia::qt

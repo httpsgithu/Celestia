@@ -12,27 +12,33 @@
 
 #pragma once
 
+#include <string_view>
+#include <system_error>
+
 #include <celcompat/charconv.h>
-#include <celcompat/string_view.h>
 
 int compareIgnoringCase(std::string_view s1, std::string_view s2);
-int compareIgnoringCase(std::string_view s1, std::string_view s2, int n);
+int compareIgnoringCase(std::string_view s1,
+                        std::string_view s2,
+                        std::string_view::size_type n);
 
 struct CompareIgnoringCasePredicate
 {
+    // enable use for lookup by std::string_view with std::string keys
+    using is_transparent = void;
     bool operator()(std::string_view, std::string_view) const;
 };
 
 template <typename T>
 [[nodiscard]] bool to_number(std::string_view p, T &result)
 {
-    auto r = std::from_chars(p.data(), p.data() + p.size(), result);
+    auto r = celestia::compat::from_chars(p.data(), p.data() + p.size(), result);
     return r.ec == std::errc();
 }
 
 template <typename T>
 [[nodiscard]] bool to_number(std::string_view p, T &result, int base)
 {
-    auto r = std::from_chars(p.data(), p.data() + p.size(), result, base);
+    auto r = celestia::compat::from_chars(p.data(), p.data() + p.size(), result, base);
     return r.ec == std::errc();
 }

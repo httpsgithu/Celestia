@@ -7,35 +7,55 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_MESHMANAGER_H_
-#define _CELENGINE_MESHMANAGER_H_
+#pragma once
 
-#include <string>
-#include <map>
-#include <celutil/resmanager.h>
-#include <celengine/geometry.h>
+#include <memory>
+#include <tuple>
+#include <utility>
+
+#include <Eigen/Core>
+
 #include <celcompat/filesystem.h>
+#include <celutil/resmanager.h>
+#include "geometry.h"
 
-
-class GeometryInfo : public ResourceInfo<Geometry>
+namespace celestia::engine
 {
- public:
-    fs::path source;
-    fs::path path;
-    bool resolvedToPath;
-    Eigen::Vector3f center;
-    float scale;
-    bool isNormalized;
+
+class GeometryInfo
+{
+public:
+    using ResourceType = Geometry;
+
+    // Ensure that models with different centers get resolved to different objects by
+    // encoding the center, scale and normalization state in the key.
+    struct ResourceKey
+    {
+        fs::path resolvedPath;
+        Eigen::Vector3f center;
+        float scale;
+        bool isNormalized;
+        bool resolvedToPath;
+
+        ResourceKey(fs::path&& _resolvedPath,
+                    const Eigen::Vector3f& _center,
+                    float _scale,
+                    bool _isNormalized,
+                    bool _resolvedToPath) :
+            resolvedPath(std::move(_resolvedPath)),
+            center(_center),
+            scale(_scale),
+            isNormalized(_isNormalized),
+            resolvedToPath(_resolvedToPath)
+        {}
+    };
 
     GeometryInfo(const fs::path& _source,
                  const fs::path& _path = "") :
         source(_source),
-        path(_path),
-        resolvedToPath(false),
-        center(Eigen::Vector3f::Zero()),
-        scale(1.0f),
-        isNormalized(true)
-        {};
+        path(_path)
+    {
+    }
 
     GeometryInfo(const fs::path& _source,
                  const fs::path& _path,
@@ -44,37 +64,41 @@ class GeometryInfo : public ResourceInfo<Geometry>
                  bool _isNormalized) :
         source(_source),
         path(_path),
-        resolvedToPath(false),
         center(_center),
         scale(_scale),
         isNormalized(_isNormalized)
-        {};
+    {
+    }
 
-    virtual fs::path resolve(const fs::path&);
-    virtual Geometry* load(const fs::path&);
+    ResourceKey resolve(const fs::path&) const;
+    std::unique_ptr<Geometry> load(const ResourceKey&) const;
+
+private:
+    fs::path source;
+    fs::path path;
+    Eigen::Vector3f center{ Eigen::Vector3f::Zero() };
+    float scale{ 1.0f };
+    bool isNormalized{ true };
+
+    friend bool operator<(const GeometryInfo&, const GeometryInfo&);
 };
 
 inline bool operator<(const GeometryInfo& g0, const GeometryInfo& g1)
 {
-    if (g0.source != g1.source)
-        return g0.source < g1.source;
-    else if (g0.path != g1.path)
-        return g0.path < g1.path;
-    else if (g0.isNormalized != g1.isNormalized)
-        return (int) g0.isNormalized < (int) g1.isNormalized;
-    else if (g0.scale != g1.scale)
-        return g0.scale < g1.scale;
-    else if (g0.center.x() != g1.center.x())
-        return g0.center.x() < g1.center.x();
-    else if (g0.center.y() != g1.center.y())
-        return g0.center.y() < g1.center.y();
-    else
-        return g0.center.z() < g1.center.z();
+    return std::tie(g0.source, g0.path, g0.isNormalized, g0.scale, g0.center.x(), g0.center.y(), g0.center.z()) <
+           std::tie(g1.source, g1.path, g1.isNormalized, g1.scale, g1.center.x(), g1.center.y(), g1.center.z());
 }
 
-typedef ResourceManager<GeometryInfo> GeometryManager;
+inline bool operator<(const GeometryInfo::ResourceKey& k0,
+                      const GeometryInfo::ResourceKey& k1)
+{
+    // we do not use the boolean resolvedToPath field here
+    return std::tie(k0.resolvedPath, k0.center.x(), k0.center.y(), k0.center.z(), k0.scale, k0.isNormalized) <
+           std::tie(k1.resolvedPath, k1.center.x(), k1.center.y(), k1.center.z(), k1.scale, k1.isNormalized);
+}
 
-extern GeometryManager* GetGeometryManager();
+using GeometryManager = ResourceManager<GeometryInfo>;
 
-#endif // _CELENGINE_MESHMANAGER_H_
+GeometryManager* GetGeometryManager();
 
+} // end namespace celestia::engine

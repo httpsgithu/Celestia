@@ -12,20 +12,36 @@
 
 #pragma once
 
-#include <celutil/array_view.h>
-#include <celcompat/filesystem.h>
+#include <cstddef>
+#include <optional>
+#include <string_view>
 
-namespace celestia
+#include <celcompat/filesystem.h>
+#include <celutil/array_view.h>
+
+namespace celestia::util
 {
-namespace util
+
+// Since std::hash<std::filesystem::path> was not in the original C++17 standard
+// we need to implement a custom hasher for older compilers.
+struct PathHasher
 {
+    std::size_t operator()(const fs::path& path) const noexcept
+    {
+        return fs::hash_value(path);
+    }
+};
+
+std::optional<fs::path> U8FileName(std::string_view source,
+                                   bool allowWildcardExtension = true);
 fs::path LocaleFilename(const fs::path& filename);
-fs::path PathExp(const fs::path& filename);
+fs::path PathExp(fs::path&& filename);
 fs::path ResolveWildcard(const fs::path& wildcard,
-                         array_view<const char*> extensions);
+                         array_view<std::string_view> extensions);
+bool IsValidDirectory(const fs::path &dir);
 #ifndef PORTABLE_BUILD
 fs::path HomeDir();
 fs::path WriteableDataPath();
 #endif
-}
-}
+
+} // end namespace celestia::util

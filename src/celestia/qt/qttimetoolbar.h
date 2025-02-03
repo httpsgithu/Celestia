@@ -10,24 +10,29 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTTIMETOOLBAR_H_
-#define _QTTIMETOOLBAR_H_
+#pragma once
 
 #include <QToolBar>
 
+class QString;
+class QWidget;
+
 class CelestiaCore;
+
+namespace celestia::qt
+{
 
 class TimeToolBar : public QToolBar
 {
-Q_OBJECT
+    Q_OBJECT
 
- public:
+public:
     TimeToolBar(CelestiaCore* _appCore,
                 const QString& title,
                 QWidget* parent = nullptr);
     ~TimeToolBar() = default;
 
- public slots:
+public slots:
     void slotPauseTime();
     void slotReverseTime();
     void slotRealTime();
@@ -37,8 +42,8 @@ Q_OBJECT
     void slotSlower();
     void slotCurrentTime();
 
- private:
+private:
     CelestiaCore* appCore;
 };
 
-#endif // _QTTIMETOOLBAR_H_
+} // end namespace celestia::qt

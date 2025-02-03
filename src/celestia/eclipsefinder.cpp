@@ -10,36 +10,35 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <cstring>
-#include <cassert>
 #include "eclipsefinder.h"
-#include "celmath/ray.h"
-#include "celmath/distance.h"
 
-using namespace Eigen;
-using namespace std;
-using namespace celmath;
+#include <cassert>
 
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 
-constexpr const double dT = 1.0 / (24.0 * 60.0);
-constexpr const int EclipseObjectMask = Body::Planet      |
-                                        Body::Moon        |
-                                        Body::MinorMoon   |
-                                        Body::DwarfPlanet |
-                                        Body::Asteroid;
+#include <celengine/body.h>
+#include <celengine/star.h>
+#include <celmath/distance.h>
+
+namespace math = celestia::math;
+namespace util = celestia::util;
+
+namespace
+{
+
+constexpr double dT = 1.0 / (24.0 * 60.0);
+constexpr auto EclipseObjectMask = BodyClassification::Planet      |
+                                   BodyClassification::Moon        |
+                                   BodyClassification::MinorMoon   |
+                                   BodyClassification::DwarfPlanet |
+                                   BodyClassification::Asteroid;
 
 // TODO: share this constant and function with render.cpp
-static const float MinRelativeOccluderRadius = 0.005f;
+constexpr float MinRelativeOccluderRadius = 0.005f;
 
-EclipseFinder::EclipseFinder(Body* _body,
-                             EclipseFinderWatcher* _watcher) :
-    body(_body),
-    watcher(_watcher)
-{
-}
-
-
-bool testEclipse(const Body& receiver, const Body& caster, double now)
+bool
+testEclipse(const Body& receiver, const Body& caster, double now)
 {
     // Ignore situations where the shadow casting body is much smaller than
     // the receiver, as these shadows aren't likely to be relevant.  Also,
@@ -56,15 +55,15 @@ bool testEclipse(const Body& receiver, const Body& caster, double now)
         // less than the distance between the sun and the receiver.  This
         // approximation works everywhere in the solar system, and likely
         // works for any orbitally stable pair of objects orbiting a star.
-        Vector3d posReceiver = receiver.getAstrocentricPosition(now);
-        Vector3d posCaster = caster.getAstrocentricPosition(now);
+        Eigen::Vector3d posReceiver = receiver.getAstrocentricPosition(now);
+        Eigen::Vector3d posCaster = caster.getAstrocentricPosition(now);
 
         const Star* sun = receiver.getSystem()->getStar();
         assert(sun != nullptr);
         double distToSun = posReceiver.norm();
         float appSunRadius = (float) (sun->getRadius() / distToSun);
 
-        Vector3d dir = posCaster - posReceiver;
+        Eigen::Vector3d dir = posCaster - posReceiver;
         double distToCaster = dir.norm() - receiver.getRadius();
         float appOccluderRadius = (float) (caster.getRadius() / distToCaster);
 
@@ -85,7 +84,7 @@ bool testEclipse(const Body& receiver, const Body& caster, double now)
         // If the distance is less than the sum of the caster's and receiver's
         // radii, then we have an eclipse.
         float R = receiver.getRadius() + shadowRadius;
-        double dist = distance(posReceiver, Ray3d(posCaster, posCaster));
+        double dist = math::distance(posReceiver, Eigen::ParametrizedLine<double, 3>(posCaster, posCaster));
         if (dist < R)
         {
             // Ignore "eclipses" where the caster and receiver have
@@ -98,9 +97,9 @@ bool testEclipse(const Body& receiver, const Body& caster, double now)
     return false;
 }
 
-#if 1
-double findEclipseSpan(const Body& receiver, const Body& caster,
-                       double now, double dt)
+double
+findEclipseSpan(const Body& receiver, const Body& caster,
+                double now, double dt)
 {
     double t = now;
     while (testEclipse(receiver, caster, t))
@@ -108,77 +107,13 @@ double findEclipseSpan(const Body& receiver, const Body& caster,
 
     return t;
 }
-#else
-// Given a time during an eclipse, find the start of the eclipse to
-// a precision of minStep.
-double findEclipseStart(const Body& receiver, const Body& occulter,
-                        double now,
-                        double startStep,
-                        double minStep)
-{
-    double step = startStep / 2;
-    double t = now - step;
-    bool eclipsed = true;
 
-    // Perform a binary search to find the end of the eclipse
-    while (step > minStep)
-    {
-        eclipsed = testEclipse(receiver, occulter, t);
-        step *= 0.5;
-        if (eclipsed)
-            t -= step;
-        else
-            t += step;
-    }
-
-    // Always return a time when the receiver is /not/ in eclipse
-    if (eclipsed)
-        t -= step;
-
-    return t;
-}
-
-// Given a time during an eclipse, find the end of the eclipse to
-// a precision of minStep.
-double findEclipseEnd(const Body& receiver, const Body& occulter,
-                      double now,
-                      double startStep,
-                      double minStep)
-{
-    // First do a coarse search to find the eclipse end to within the precision
-    // of startStep.
-    while (testEclipse(receiver, occulter, now + startStep))
-        now += startStep;
-
-    double step = startStep / 2;
-    double t = now + step;
-    bool eclipsed = true;
-
-
-    // Perform a binary search to find the end of the eclipse
-    while (step > minStep)
-    {
-        eclipsed = testEclipse(receiver, occulter, t);
-        step *= 0.5;
-        if (eclipsed)
-            t += step;
-        else
-            t -= step;
-    }
-
-    // Always return a time when the receiver is /not/ in eclipse
-    if (eclipsed)
-        t += step;
-
-    return t;
-}
-#endif
-
-void addEclipse(const Body& receiver, const Body& occulter,
-                double now,
-                double /*startStep*/, double /*minStep*/,
-                vector<Eclipse>& eclipses,
-                vector<double>& previousEclipseEndTimes, int i)
+void
+addEclipse(const Body& receiver, const Body& occulter,
+           double now,
+           double /*startStep*/, double /*minStep*/,
+           std::vector<Eclipse>& eclipses,
+           std::vector<double>& previousEclipseEndTimes, int i)
 {
     if (testEclipse(receiver, occulter, now))
     {
@@ -198,10 +133,19 @@ void addEclipse(const Body& receiver, const Body& occulter,
     }
 }
 
+} // end unnamed namespace
+
+EclipseFinder::EclipseFinder(const Body* _body,
+                             EclipseFinderWatcher* _watcher) :
+    body(_body),
+    watcher(_watcher)
+{
+}
+
 void EclipseFinder::findEclipses(double startDate,
                                  double endDate,
                                  int eclipseTypeMask,
-                                 vector<Eclipse>& eclipses)
+                                 std::vector<Eclipse>& eclipses)
 {
     PlanetarySystem* satellites = body->getSatellites();
 
@@ -210,15 +154,15 @@ void EclipseFinder::findEclipses(double startDate,
         return;
 
     // For each body, we'll need to store the time when the last eclipse ended
-    vector<double> previousEclipseEndTimes;
+    std::vector<double> previousEclipseEndTimes;
 
     // Make a list of satellites that we'll actually test for eclipses; ignore
     // spacecraft and very small objects.
-    vector<Body*> testBodies;
+    std::vector<Body*> testBodies;
     for (int i = 0; i < satellites->getSystemSize(); i++)
     {
         Body* obj = satellites->getBody(i);
-        if ((obj->getClassification() & EclipseObjectMask) != 0 &&
+        if (util::is_set(obj->getClassification(), EclipseObjectMask) &&
             obj->getRadius() >= body->getRadius() * MinRelativeOccluderRadius)
         {
             testBodies.push_back(obj);

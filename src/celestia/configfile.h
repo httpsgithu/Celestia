@@ -7,86 +7,107 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CONFIGFILE_H_
-#define _CONFIGFILE_H_
+#pragma once
 
 #include <string>
 #include <vector>
-#include <celengine/parser.h>
-#include <celengine/star.h>
+
 #include <celcompat/filesystem.h>
-
-
-class CelestiaConfig
-{
-public:
-    fs::path starDatabaseFile;
-    fs::path starNamesFile;
-    std::vector<fs::path> solarSystemFiles;
-    std::vector<fs::path> starCatalogFiles;
-    std::vector<fs::path> dsoCatalogFiles;
-    std::vector<fs::path> extrasDirs;
-    std::vector<fs::path> skipExtras;
-    fs::path deepSkyCatalog;
-    fs::path asterismsFile;
-    fs::path boundariesFile;
-    float faintestVisible;
-    fs::path favoritesFile;
-    fs::path initScriptFile;
-    fs::path demoScriptFile;
-    fs::path destinationsFile;
-    std::string mainFont;
-    std::string labelFont;
-    std::string titleFont;
-    fs::path logoTextureFile;
-    std::string cursor;
-    std::vector<std::string> ignoreGLExtensions;
-    float rotateAcceleration;
-    float mouseRotationSensitivity;
-    bool  reverseMouseWheel;
-    double orbitWindowEnd;
-    double orbitPeriodsShown;
-    double linearFadeFraction;
-    fs::path scriptScreenshotDirectory;
-    std::string scriptSystemAccessPolicy;
+#include <celengine/star.h>
 #ifdef CELX
-    fs::path luaHook;
-    Hash* configParams;
+#include <celengine/value.h>
 #endif
 
-    fs::path HDCrossIndexFile;
-    fs::path SAOCrossIndexFile;
-    fs::path GlieseCrossIndexFile;
 
-    StarDetails::StarTextureSet starTextures;
+struct CelestiaConfig
+{
+    struct Paths
+    {
+        fs::path starDatabaseFile{ };
+        fs::path starNamesFile{ };
+        std::vector<fs::path> solarSystemFiles{ };
+        std::vector<fs::path> starCatalogFiles{ };
+        std::vector<fs::path> dsoCatalogFiles{ };
+        std::vector<fs::path> extrasDirs{ };
+        std::vector<fs::path> skipExtras{ };
+        fs::path asterismsFile{ };
+        fs::path boundariesFile{ };
+        fs::path favoritesFile{ };
+        fs::path initScriptFile{ };
+        fs::path demoScriptFile{ };
+        fs::path destinationsFile{ };
+        fs::path HDCrossIndexFile{ };
+        fs::path SAOCrossIndexFile{ };
+        fs::path warpMeshFile{ };
+        fs::path leapSecondsFile{ };
+#ifdef CELX
+        fs::path scriptScreenshotDirectory{ };
+        fs::path luaHook{ };
+#endif
+    };
 
-    // Renderer detail options
-    unsigned int shadowTextureSize;
-    unsigned int eclipseTextureSize;
-    unsigned int orbitPathSamplePoints;
+    struct Fonts
+    {
+        fs::path mainFont{ };
+        fs::path labelFont{ };
+        fs::path titleFont{ };
+    };
 
-    unsigned int aaSamples;
+    struct Mouse
+    {
+        std::string cursor{ };
+        float rotateAcceleration{ 120.0f };
+        float rotationSensitivity{ 1.0f };
+        bool reverseWheel{ false };
+        bool rayBasedDragging{ false };
+        bool focusZooming{ false };
+    };
 
-    bool hdr;
+    struct RenderDetails
+    {
+        double orbitWindowEnd{ 0.5 };
+        double orbitPeriodsShown{ 1.0 };
+        double linearFadeFraction{ 0.0 };
+        float faintestVisible{ 6.0f };
+        unsigned int shadowTextureSize{ 256 };
+        unsigned int eclipseTextureSize{ 128 };
+        unsigned int orbitPathSamplePoints{ 100 };
+        unsigned int aaSamples{ 1 };
+        float SolarSystemMaxDistance{ 1.0f };
+        unsigned int ShadowMapSize{ 0 };
+        std::vector<std::string> ignoreGLExtensions{ };
+    };
 
-    unsigned int consoleLogRows;
+    CelestiaConfig() = default;
+    ~CelestiaConfig() = default;
+    CelestiaConfig(const CelestiaConfig&) = delete;
+    CelestiaConfig& operator=(const CelestiaConfig&) = delete;
+    CelestiaConfig(CelestiaConfig&&) = default;
+    CelestiaConfig& operator=(CelestiaConfig&&) = default;
 
-    Hash* params;
+    Paths paths{ };
+    Fonts fonts{ };
+    Mouse mouse{ };
+    RenderDetails renderDetails{ };
+    StarDetails::StarTextureSet starTextures{ };
 
-    float getFloatValue(const std::string& name);
-    const std::string getStringValue(const std::string& name);
+    std::string scriptSystemAccessPolicy{ };
 
-    float SolarSystemMaxDistance;
-    unsigned ShadowMapSize;
+    unsigned int consoleLogRows{ 200 };
 
-    std::string projectionMode;
-    std::string viewportEffect;
-    std::string warpMeshFile;
+    std::string projectionMode{ };
+    std::string viewportEffect{ };
+    std::string measurementSystem{ };
+    std::string temperatureScale{ };
 
-    std::string x264EncoderOptions;
-    std::string ffvhEncoderOptions;
+    std::string x264EncoderOptions{ };
+    std::string ffvhEncoderOptions{ };
+
+    std::string layoutDirection{ };
+
+#ifdef CELX
+    Value configParams{ };
+#endif
 };
 
-CelestiaConfig* ReadCelestiaConfig(const fs::path& filename, CelestiaConfig* config = nullptr);
-
-#endif // _CONFIGFILE_H_
+bool ReadCelestiaConfig(const fs::path& filename, CelestiaConfig& config);

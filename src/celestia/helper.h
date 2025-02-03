@@ -1,9 +1,9 @@
-#ifndef _HELPER_H_
-#define _HELPER_H_
+#pragma once
 
 #include <string>
 
-class Body;
+#include <celengine/body.h>
+
 class Selection;
 class Renderer;
 
@@ -17,8 +17,6 @@ class Helper
 
  private:
     static bool hasPrimaryStar(const Body* body);
-    static bool hasPrimaryBody(const Body* body, int classification);
+    static bool hasPrimaryBody(const Body* body, BodyClassification classification);
     static bool hasBarycenter(const Body* body);
 };
-
-#endif

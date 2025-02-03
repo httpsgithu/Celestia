@@ -12,35 +12,18 @@
 #define DEBUG_SECONDARY_ILLUMINATION 0
 #define DEBUG_ORBIT_CACHE            0
 
-//#define DEBUG_HDR
-#ifdef DEBUG_HDR
-//#define DEBUG_HDR_FILE
-//#define DEBUG_HDR_ADAPT
-//#define DEBUG_HDR_TONEMAP
-#endif
-#ifdef DEBUG_HDR_FILE
-#include <fstream>
-std::ofstream hdrlog;
-#define HDR_LOG     hdrlog
-#else
-#define HDR_LOG     cout
-#endif
+#include <Eigen/Geometry>
 
-#ifdef USE_HDR
-#define BLUR_PASS_COUNT     2
-#define BLUR_SIZE           128
-#define DEFAULT_EXPOSURE    -23.35f
-#define EXPOSURE_HALFLIFE   0.4f
-#endif
+#include <boost/container/static_vector.hpp>
+#include <fmt/format.h>
 
+#include "atmosphere.h"
+#include "location.h"
 #include "render.h"
 #include "boundaries.h"
 #include "dsorenderer.h"
 #include "asterism.h"
-#include "astro.h"
-#include "vecgl.h"
 #include "glshader.h"
-#include "shadermanager.h"
 #include "spheremesh.h"
 #include "lodspheremesh.h"
 #include "geometry.h"
@@ -50,6 +33,7 @@ std::ofstream hdrlog;
 #include "renderglsl.h"
 #include "axisarrow.h"
 #include "frametree.h"
+#include "timeline.h"
 #include "timelinephase.h"
 #include "skygrid.h"
 #include "modelgeometry.h"
@@ -57,21 +41,39 @@ std::ofstream hdrlog;
 #include "shadermanager.h"
 #include "rectangle.h"
 #include "framebuffer.h"
+#include "planetgrid.h"
 #include "pointstarvertexbuffer.h"
 #include "pointstarrenderer.h"
 #include "orbitsampler.h"
-#include "asterismrenderer.h"
-#include "boundariesrenderer.h"
 #include "rendcontext.h"
-#include "vertexobject.h"
+#include "textlayout.h"
+#include <celastro/astro.h>
+#include <celastro/date.h>
+#include <celcompat/numbers.h>
 #include <celengine/observer.h>
+#include <celephem/rotation.h>
 #include <celmath/frustum.h>
 #include <celmath/distance.h>
 #include <celmath/intersect.h>
 #include <celmath/geomutil.h>
-#include <celutil/debug.h>
+#include <celmath/vecgl.h>
+#include <celrender/asterismrenderer.h>
+#include <celrender/atmosphererenderer.h>
+#include <celrender/boundariesrenderer.h>
+#include <celrender/cometrenderer.h>
+#include <celrender/eclipticlinerenderer.h>
+#include <celrender/largestarrenderer.h>
+#include <celrender/linerenderer.h>
+#include <celrender/galaxyrenderer.h>
+#include <celrender/globularrenderer.h>
+#include <celrender/nebularenderer.h>
+#include <celrender/openclusterrenderer.h>
+#include <celrender/ringrenderer.h>
+#include <celrender/skygridrenderer.h>
+#include <celrender/gl/buffer.h>
+#include <celrender/gl/vertexobject.h>
+#include <celutil/logger.h>
 #include <celutil/utf8.h>
-#include <celutil/util.h>
 #include <celutil/timer.h>
 #include <celttf/truetypefont.h>
 #include "glsupport.h"
@@ -81,23 +83,19 @@ std::ofstream hdrlog;
 #include <sstream>
 #include <iomanip>
 #include <numeric>
-#ifdef USE_GLCONTEXT
-#include "glcontext.h"
-#endif
 #ifdef _MSC_VER
 #include <malloc.h>
+#ifndef alloca
 #define alloca(s) _alloca(s)
 #endif
+#endif
 
-using namespace cmod;
 using namespace Eigen;
 using namespace std;
 using namespace celestia;
-using namespace celmath;
-
-#define FOV           45.0f
-#define NEAR_DIST      0.5f
-#define FAR_DIST       1.0e9f
+using namespace celestia::engine;
+using namespace celestia::render;
+using celestia::util::GetLogger;
 
 static const int REF_DISTANCE_TO_SCREEN  = 400; //[mm]
 
@@ -108,9 +106,6 @@ static const float PLANETSHINE_DISTANCE_LIMIT_FACTOR = 100.0f;
 // Planetshine from objects less than this pixel size is treated as insignificant
 // and will be ignored.
 static const float PLANETSHINE_PIXEL_SIZE_LIMIT      =   0.1f;
-
-// Distance from the Sun at which comet tails will start to fade out
-static const float COMET_TAIL_ATTEN_DIST_SOL = astro::AUtoKilometers(5.0f);
 
 // Fractional pixel offset used when rendering text as texture mapped
 // quads to ensure consistent mapping of texels to pixels.
@@ -154,10 +149,6 @@ static Texture* gaussianDiscTex = nullptr;
 static Texture* gaussianGlareTex = nullptr;
 
 static const float CoronaHeight = 0.2f;
-
-static const int MaxSkyRings = 32;
-static const int MaxSkySlices = 180;
-static const int MinSkySlices = 30;
 
 // Size at which the orbit cache will be flushed of old orbit paths
 static const unsigned int OrbitCacheCullThreshold = 200;
@@ -226,35 +217,27 @@ inline float sizeFade(float screenSize, float minScreenSize, float opaqueScale)
     return min(1.0f, (screenSize - minScreenSize) / (minScreenSize * (opaqueScale - 1)));
 }
 
-
-// Calculate the cosine of half the maximum field of view. We'll use this for
-// fast testing of object visibility.  The function takes the vertical FOV (in
-// degrees) as an argument. When computing the view cone, we want the field of
-// view as measured on the diagonal between viewport corners.
-double computeCosViewConeAngle(double verticalFOV, double width, double height)
+inline void glVertexAttrib(GLuint index, const Color &color)
 {
-    double h = tan(degToRad(verticalFOV / 2));
-    double diag = sqrt(1.0 + square(h) + square(h * width / height));
-    return 1.0 / diag;
+#ifdef GL_ES
+    glVertexAttrib4fv(index, color.toVector4().data());
+#else
+    glVertexAttrib4Nubv(index, color.data());
+#endif
 }
-
 
 Renderer::Renderer() :
     windowWidth(0),
     windowHeight(0),
-    fov(FOV),
-    cosViewConeAngle(computeCosViewConeAngle(fov, 1, 1)),
+    fov(standardFOV),
     screenDpi(96),
     corrFac(1.12f),
     faintestAutoMag45deg(8.0f), //def. 7.0f
-    projectionMode(ProjectionMode::PerspectiveMode),
 #ifndef GL_ES
     renderMode(GL_FILL),
 #endif
-    labelMode(LocationLabels), //def. NoLabels
+    labelMode(NoLabels),
     renderFlags(DefaultRenderFlags),
-    orbitMask(Body::Planet | Body::Moon | Body::Stellar),
-    ambientLightLevel(0.1f),
     brightnessBias(0.0f),
     saturationMagNight(1.0f),
     saturationMag(1.0f),
@@ -268,45 +251,28 @@ Renderer::Renderer() :
     distanceLimit(1.0e6f),
     minFeatureSize(MinFeatureSizeForLabel),
     locationFilter(~0ull),
-    colorTemp(nullptr),
-#ifdef USE_HDR
-    sceneTexture(0),
-    blurFormat(GL_RGBA),
-    useLuminanceAlpha(false),
-    bloomEnabled(true),
-    maxBodyMag(100.0f),
-    exposure(1.0f),
-    exposurePrev(1.0f),
-    brightPlus(0.0f),
-#endif
     settingsChanged(true),
-    objectAnnotationSetOpen(false)
+    objectAnnotationSetOpen(false),
+    m_atmosphereRenderer(std::make_unique<AtmosphereRenderer>(*this)),
+    m_cometRenderer(std::make_unique<CometRenderer>(*this)),
+    m_eclipticLineRenderer(std::make_unique<EclipticLineRenderer>(*this)),
+    m_galaxyRenderer(std::make_unique<GalaxyRenderer>(*this)),
+    m_globularRenderer(std::make_unique<GlobularRenderer>(*this)),
+    m_largeStarRenderer(std::make_unique<LargeStarRenderer>(*this)),
+    m_hollowMarkerRenderer(std::make_unique<LineRenderer>(*this, 1.0f, LineRenderer::PrimType::Lines, LineRenderer::StorageType::Static)),
+    m_nebulaRenderer(std::make_unique<NebulaRenderer>(*this)),
+    m_openClusterRenderer(std::make_unique<OpenClusterRenderer>(*this)),
+    m_ringRenderer(std::make_unique<RingRenderer>(*this)),
+    m_skyGridRenderer(std::make_unique<SkyGridRenderer>(*this))
 {
     pointStarVertexBuffer = new PointStarVertexBuffer(*this, 2048);
     glareVertexBuffer = new PointStarVertexBuffer(*this, 2048);
-    skyVertices = new SkyVertex[MaxSkySlices * (MaxSkyRings + 1)];
-    skyIndices = new uint32_t[(MaxSkySlices + 1) * 2 * MaxSkyRings];
-    skyContour = new SkyContourPoint[MaxSkySlices + 1];
-    colorTemp = GetStarColorTable(ColorTable_Blackbody_D65);
-#ifdef DEBUG_HDR_FILE
-    HDR_LOG.open("hdr.log", ios_base::app);
-#endif
-#ifdef USE_HDR
-    blurTextures = new Texture*[BLUR_PASS_COUNT];
-    blurTempTexture = nullptr;
-    for (size_t i = 0; i < BLUR_PASS_COUNT; ++i)
-    {
-        blurTextures[i] = nullptr;
-    }
-#endif
 
     for (int i = 0; i < (int) FontCount; i++)
     {
         fonts[i] = nullptr;
     }
-
     shaderManager = new ShaderManager();
-    m_VertexObjects.fill(nullptr);
 }
 
 
@@ -314,30 +280,12 @@ Renderer::~Renderer()
 {
     delete pointStarVertexBuffer;
     delete glareVertexBuffer;
-    delete[] skyVertices;
-    delete[] skyIndices;
-    delete[] skyContour;
-
-#ifdef USE_HDR
-    for (size_t i = 0; i < BLUR_PASS_COUNT; ++i)
-    {
-        if (blurTextures[i] != nullptr)
-            delete blurTextures[i];
-    }
-    delete [] blurTextures;
-    if (blurTempTexture)
-        delete blurTempTexture;
-
-    if (sceneTexture != 0)
-        glDeleteTextures(1, &sceneTexture);
-#endif
-
     delete shaderManager;
-    delete m_asterismRenderer;
-    delete m_boundariesRenderer;
 
-    for (auto p : m_VertexObjects)
-        delete p;
+    m_atmosphereRenderer->deinitGL();
+    m_cometRenderer->deinitGL();
+    CurvePlot::deinit();
+    PlanetographicGrid::deinit();
 }
 
 
@@ -396,7 +344,9 @@ static void BuildGaussianDiscMipLevel(unsigned char* mipPixels,
     unsigned int size = 1 << log2size;
     float sigma = fwhm / 2.3548f;
     float isig2 = 1.0f / (2.0f * sigma * sigma);
-    float s = 1.0f / (sigma * (float) sqrt(2.0 * PI));
+    // Store 1/sqrt(2*pi) in constexpr sfactor
+    constexpr auto sfactor = static_cast<float>(0.5 * celestia::numbers::sqrt2 * celestia::numbers::inv_sqrtpi);
+    float s = sfactor / sigma;
 
     for (unsigned int i = 0; i < size; i++)
     {
@@ -405,9 +355,9 @@ static void BuildGaussianDiscMipLevel(unsigned char* mipPixels,
         {
             float x = (float) j - size / 2;
             float r2 = x * x + y * y;
-            float f = s * (float) exp(-r2 * isig2) * power;
+            float f = s * std::exp(-r2 * isig2) * power;
 
-            mipPixels[i * size + j] = (unsigned char) (255.99f * min(f, 1.0f));
+            mipPixels[i * size + j] = (unsigned char) (255.99f * std::min(f, 1.0f));
         }
     }
 }
@@ -426,9 +376,9 @@ static void BuildGlareMipLevel(unsigned char* mipPixels,
         for (unsigned int j = 0; j < size; j++)
         {
             float x = (float) j - size / 2;
-            auto r = (float) sqrt(x * x + y * y);
-            auto f = (float) pow(base, r * scale);
-            mipPixels[i * size + j] = (unsigned char) (255.99f * min(f, 1.0f));
+            float r = std::sqrt(x * x + y * y);
+            float f = std::pow(base, r * scale);
+            mipPixels[i * size + j] = (unsigned char) (255.99f * std::min(f, 1.0f));
         }
     }
 }
@@ -465,15 +415,15 @@ static void BuildGlareMipLevel2(unsigned char* mipPixels,
 static Texture* BuildGaussianDiscTexture(unsigned int log2size)
 {
     unsigned int size = 1 << log2size;
-    Image* img = new Image(PixelFormat::LUMINANCE, size, size, log2size + 1);
+    Image* img = new Image(PixelFormat::Luminance, size, size, log2size + 1);
 
     for (unsigned int mipLevel = 0; mipLevel <= log2size; mipLevel++)
     {
-        float fwhm = (float) pow(2.0f, (float) (log2size - mipLevel)) * 0.3f;
+        float fwhm = std::pow(2.0f, (float) (log2size - mipLevel)) * 0.3f;
         BuildGaussianDiscMipLevel(img->getMipLevel(mipLevel),
                                   log2size - mipLevel,
                                   fwhm,
-                                  (float) pow(2.0f, (float) (log2size - mipLevel)));
+                                  std::pow(2.0f, (float) (log2size - mipLevel)));
     }
 
     ImageTexture* texture = new ImageTexture(*img,
@@ -489,7 +439,7 @@ static Texture* BuildGaussianDiscTexture(unsigned int log2size)
 static Texture* BuildGaussianGlareTexture(unsigned int log2size)
 {
     unsigned int size = 1 << log2size;
-    Image* img = new Image(PixelFormat::LUMINANCE, size, size, log2size + 1);
+    Image* img = new Image(PixelFormat::Luminance, size, size, log2size + 1);
 
     for (unsigned int mipLevel = 0; mipLevel <= log2size; mipLevel++)
     {
@@ -523,24 +473,25 @@ static Texture* BuildGaussianGlareTexture(unsigned int log2size)
 }
 
 
-static int translateLabelModeToClassMask(int labelMode)
+static BodyClassification
+translateLabelModeToClassMask(int labelMode)
 {
-    int classMask = 0;
+    BodyClassification classMask = BodyClassification::EmptyMask;
 
     if (labelMode & Renderer::PlanetLabels)
-        classMask |= Body::Planet;
+        classMask |= BodyClassification::Planet;
     if (labelMode & Renderer::DwarfPlanetLabels)
-        classMask |= Body::DwarfPlanet;
+        classMask |= BodyClassification::DwarfPlanet;
     if (labelMode & Renderer::MoonLabels)
-        classMask |= Body::Moon;
+        classMask |= BodyClassification::Moon;
     if (labelMode & Renderer::MinorMoonLabels)
-        classMask |= Body::MinorMoon;
+        classMask |= BodyClassification::MinorMoon;
     if (labelMode & Renderer::AsteroidLabels)
-        classMask |= Body::Asteroid;
+        classMask |= BodyClassification::Asteroid;
     if (labelMode & Renderer::CometLabels)
-        classMask |= Body::Comet;
+        classMask |= BodyClassification::Comet;
     if (labelMode & Renderer::SpacecraftLabels)
-        classMask |= Body::Spacecraft;
+        classMask |= BodyClassification::Spacecraft;
 
     return classMask;
 }
@@ -573,18 +524,16 @@ bool Renderer::OrbitPathListEntry::operator<(const Renderer::OrbitPathListEntry&
 }
 
 
-#ifdef USE_GLCONTEXT
-bool Renderer::init(GLContext* _context,
-#else
-bool Renderer::init(
-#endif
-                    int winWidth, int winHeight,
-                    DetailOptions& _detailOptions)
+bool Renderer::init(int winWidth, int winHeight, const DetailOptions& _detailOptions)
 {
-#ifdef USE_GLCONTEXT
-    context = _context;
-#endif
     detailOptions = _detailOptions;
+
+    m_atmosphereRenderer->initGL();
+    if (!m_cometRenderer->initGL())
+        return false;
+
+    m_markerVO = std::make_unique<celestia::gl::VertexObject>();
+    m_markerBO = std::make_unique<celestia::gl::Buffer>();
 
     // Initialize static meshes and textures common to all instances of Renderer
     if (!commonDataInitialized)
@@ -594,52 +543,18 @@ bool Renderer::init(
         gaussianDiscTex = BuildGaussianDiscTexture(8);
         gaussianGlareTex = BuildGaussianGlareTexture(9);
 
-#ifdef USE_HDR
-        genSceneTexture();
-        genBlurTextures();
-#endif
-
         commonDataInitialized = true;
     }
-
-#ifdef USE_HDR
-    Image        *testImg = new Image(PixelFormat::LUM_ALPHA, 1, 1);
-    ImageTexture *testTex = new ImageTexture(*testImg,
-                                             Texture::EdgeClamp,
-                                             Texture::NoMipMaps);
-    delete testImg;
-    GLint actualTexFormat = 0;
-    glEnable(GL_TEXTURE_2D);
-    testTex->bind();
-    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &actualTexFormat);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glDisable(GL_TEXTURE_2D);
-    switch (actualTexFormat)
-    {
-    case 2:
-    case GL_LUMINANCE_ALPHA:
-    case GL_LUMINANCE4_ALPHA4:
-    case GL_LUMINANCE6_ALPHA2:
-    case GL_LUMINANCE8_ALPHA8:
-    case GL_LUMINANCE12_ALPHA4:
-    case GL_LUMINANCE12_ALPHA12:
-    case GL_LUMINANCE16_ALPHA16:
-        useLuminanceAlpha = true;
-        break;
-    default:
-        useLuminanceAlpha = false;
-        break;
-    }
-
-    blurFormat = useLuminanceAlpha ? GL_LUMINANCE_ALPHA : GL_RGBA;
-    delete testTex;
-#endif
 
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    if (gl::MESA_pack_invert)
+#ifndef GL_ES
+    if (detailOptions.useMesaPackInvert && gl::MESA_pack_invert)
         glPixelStorei(GL_PACK_INVERT_MESA, GL_TRUE);
+    else
+        detailOptions.useMesaPackInvert = false;
+#endif
 
     // LEQUAL rather than LESS required for multipass rendering
     glDepthFunc(GL_LEQUAL);
@@ -652,37 +567,17 @@ bool Renderer::init(
 
 void Renderer::resize(int width, int height)
 {
-#ifdef USE_HDR
-    if (width == windowWidth && height == windowHeight)
-        return;
-#endif
     windowWidth = width;
     windowHeight = height;
-    cosViewConeAngle = computeCosViewConeAngle(fov, windowWidth, windowHeight);
+    projectionMode->setSize(static_cast<float>(windowWidth), static_cast<float>(windowHeight));
     // glViewport(windowWidth, windowHeight);
-    m_orthoProjMatrix = Ortho2D(0.0f, (float)windowWidth, 0.0f, (float)windowHeight);
-
-#ifdef USE_HDR
-    if (commonDataInitialized)
-    {
-        genSceneTexture();
-        genBlurTextures();
-    }
-#endif
-}
-
-float Renderer::calcPixelSize(float fovY, float windowHeight)
-{
-    if (getProjectionMode() == ProjectionMode::FisheyeMode)
-        return 2.0f / windowHeight;
-    return 2 * (float) tan(degToRad(fovY / 2.0)) / (float) windowHeight;
+    m_orthoProjMatrix = math::Ortho2D(0.0f, (float)windowWidth, 0.0f, (float)windowHeight);
 }
 
 void Renderer::setFieldOfView(float _fov)
 {
     fov = _fov;
-    corrFac = (0.12f * fov/FOV * fov/FOV + 1.0f);
-    cosViewConeAngle = computeCosViewConeAngle(fov, windowWidth, windowHeight);
+    corrFac = (0.12f * fov / standardFOV * fov / standardFOV + 1.0f);
 }
 
 int Renderer::getScreenDpi() const
@@ -703,6 +598,7 @@ int Renderer::getWindowHeight() const
 void Renderer::setScreenDpi(int _dpi)
 {
     screenDpi = _dpi;
+    projectionMode->setScreenDpi(_dpi);
 }
 
 float Renderer::getScaleFactor() const
@@ -718,26 +614,6 @@ float Renderer::getPointWidth() const
 float Renderer::getPointHeight() const
 {
     return 2.0f / windowHeight * getScaleFactor();
-}
-
-float Renderer::getLineWidthX() const
-{
-    return ((renderFlags | ShowSmoothLines) ? 1.5f : 1.0f) * getPointWidth();
-}
-
-float Renderer::getLineWidthY() const
-{
-    return ((renderFlags | ShowSmoothLines) ? 1.5f : 1.0f) * getPointHeight();
-}
-
-float Renderer::getRasterizedLineWidth(float multiplier) const
-{
-    return multiplier * ((renderFlags | ShowSmoothLines) ? 1.5f : 1.0f) * getScaleFactor();
-}
-
-bool Renderer::shouldDrawLineAsTriangles(float multiplier) const
-{
-    return getRasterizedLineWidth(multiplier) > celestia::gl::maxLineWidth;
 }
 
 void Renderer::setFaintestAM45deg(float _faintestAutoMag45deg)
@@ -756,10 +632,29 @@ unsigned int Renderer::getResolution() const
     return textureResolution;
 }
 
+void Renderer::enableSelectionPointer()
+{
+    showSelectionPointer = true;
+}
+
+void Renderer::disableSelectionPointer()
+{
+    showSelectionPointer = false;
+}
+
+void Renderer::setRTL(bool value)
+{
+    rtl = value;
+}
+
+bool Renderer::isRTL() const
+{
+    return rtl;
+}
 
 void Renderer::setResolution(unsigned int resolution)
 {
-    if (resolution < TEXTURE_RESOLUTION)
+    if (resolution < MultiResTexture::kTextureResolution)
         textureResolution = resolution;
     markSettingsChanged();
 }
@@ -817,41 +712,42 @@ void Renderer::setLabelMode(int _labelMode)
     markSettingsChanged();
 }
 
-Renderer::ProjectionMode Renderer::getProjectionMode() const
+shared_ptr<celestia::engine::ProjectionMode> Renderer::getProjectionMode() const
 {
     return projectionMode;
 }
 
-void Renderer::setProjectionMode(ProjectionMode _projectionMode)
+void Renderer::setProjectionMode(shared_ptr<celestia::engine::ProjectionMode> _projectionMode)
 {
     projectionMode = _projectionMode;
-    shaderManager->setFisheyeEnabled(projectionMode == ProjectionMode::FisheyeMode);
+    projectionMode->configureShaderManager(shaderManager);
     markSettingsChanged();
 }
 
-int Renderer::getOrbitMask() const
+BodyClassification
+Renderer::getOrbitMask() const
 {
     return orbitMask;
 }
 
-void Renderer::setOrbitMask(int mask)
+void
+Renderer::setOrbitMask(BodyClassification mask)
 {
     orbitMask = mask;
     markSettingsChanged();
 }
 
-
-const ColorTemperatureTable*
+ColorTableType
 Renderer::getStarColorTable() const
 {
-    return colorTemp;
+    return starColors.type();
 }
 
 
 void
-Renderer::setStarColorTable(const ColorTemperatureTable* ct)
+Renderer::setStarColorTable(ColorTableType ct)
 {
-    colorTemp = ct;
+    starColors.setType(ct);
     markSettingsChanged();
 }
 
@@ -875,6 +771,19 @@ float Renderer::getAmbientLightLevel() const
 void Renderer::setAmbientLightLevel(float level)
 {
     ambientLightLevel = level;
+    markSettingsChanged();
+}
+
+
+float Renderer::getTintSaturation() const
+{
+    return tintSaturation;
+}
+
+
+void Renderer::setTintSaturation(float level)
+{
+    tintSaturation = level;
     markSettingsChanged();
 }
 
@@ -918,21 +827,56 @@ void Renderer::setDistanceLimit(float distanceLimit_)
     markSettingsChanged();
 }
 
+void Renderer::getLabelAlignmentInfo(const Annotation &annotation, const TextureFont *font, TextLayout::HorizontalAlignment &halign, float &hOffset, float &vOffset) const
+{
+    switch (annotation.halign)
+    {
+    case LabelHorizontalAlignment::Center:
+        halign = TextLayout::HorizontalAlignment::Center;
+        hOffset = 0.0f;
+        break;
+    case LabelHorizontalAlignment::End:
+        halign = rtl ? TextLayout::HorizontalAlignment::Left : TextLayout::HorizontalAlignment::Right;
+        hOffset = -2.0f;
+        break;
+    case LabelHorizontalAlignment::Start:
+        halign = rtl ? TextLayout::HorizontalAlignment::Right : TextLayout::HorizontalAlignment::Left;
+        if (annotation.markerRep != nullptr)
+            hOffset = 2.0f + std::trunc(annotation.markerRep->size() / 2.0f);
+        else
+            hOffset = 2.0f;
+        break;
+    }
+    if (rtl)
+        hOffset = -hOffset;
+
+    switch (annotation.valign)
+    {
+    case LabelVerticalAlignment::Center:
+        vOffset = -static_cast<float>(font->getHeight()) / 2.0f;
+        break;
+    case LabelVerticalAlignment::Top:
+        vOffset = -static_cast<float>(font->getHeight());
+        break;
+    case LabelVerticalAlignment::Bottom:
+        vOffset = 0.0f;
+        break;
+    }
+}
 
 void Renderer::addAnnotation(vector<Annotation>& annotations,
                              const celestia::MarkerRepresentation* markerRep,
-                             const string& labelText,
+                             std::string_view labelText,
                              Color color,
                              const Vector3f& pos,
-                             LabelAlignment halign,
+                             LabelHorizontalAlignment halign,
                              LabelVerticalAlignment valign,
                              float size,
                              bool special)
 {
-    GLint view[4] = { 0, 0, windowWidth, windowHeight };
+    std::array<int, 4> view{ 0, 0, windowWidth, windowHeight };
     Vector3f win;
-    bool fisheye = projectionMode == ProjectionMode::FisheyeMode;
-    bool success = fisheye ? ProjectFisheye(pos, m_modelMatrix, m_projMatrix, view, win) : ProjectPerspective(pos, m_MVPMatrix, view, win);
+    bool success = projectionMode->project(pos, m_modelMatrix, m_projMatrix, m_MVPMatrix, view, win);
     if (success)
     {
         float depth = pos.x() * m_modelMatrix(2, 0) +
@@ -961,10 +905,10 @@ void Renderer::addAnnotation(vector<Annotation>& annotations,
 
 
 void Renderer::addForegroundAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                       const string& labelText,
+                                       std::string_view labelText,
                                        Color color,
                                        const Vector3f& pos,
-                                       LabelAlignment halign,
+                                       LabelHorizontalAlignment halign,
                                        LabelVerticalAlignment valign,
                                        float size)
 {
@@ -973,10 +917,10 @@ void Renderer::addForegroundAnnotation(const celestia::MarkerRepresentation* mar
 
 
 void Renderer::addBackgroundAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                       const string& labelText,
+                                       std::string_view labelText,
                                        Color color,
                                        const Vector3f& pos,
-                                       LabelAlignment halign,
+                                       LabelHorizontalAlignment halign,
                                        LabelVerticalAlignment valign,
                                        float size)
 {
@@ -985,10 +929,10 @@ void Renderer::addBackgroundAnnotation(const celestia::MarkerRepresentation* mar
 
 
 void Renderer::addSortedAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                   const string& labelText,
+                                   std::string_view labelText,
                                    Color color,
                                    const Vector3f& pos,
-                                   LabelAlignment halign,
+                                   LabelHorizontalAlignment halign,
                                    LabelVerticalAlignment valign,
                                    float size)
 {
@@ -996,19 +940,27 @@ void Renderer::addSortedAnnotation(const celestia::MarkerRepresentation* markerR
 }
 
 
-void Renderer::clearAnnotations(vector<Annotation>& annotations)
-{
-    annotations.clear();
-}
-
-
-// Return the orientation of the camera used to render the current
+// Return the orientation of the transformed camera orientation used to render the current
 // frame. Available only while rendering a frame.
-const Quaternionf& Renderer::getCameraOrientation() const
+Quaterniond Renderer::getCameraOrientation() const
 {
     return m_cameraOrientation;
 }
 
+Quaternionf Renderer::getCameraOrientationf() const
+{
+    return getCameraOrientation().cast<float>();
+}
+
+Matrix3d Renderer::getCameraTransform() const
+{
+    return m_cameraTransform;
+}
+
+void Renderer::setCameraTransform(const Matrix3d& transform)
+{
+    m_cameraTransform = transform;
+}
 
 float Renderer::getNearPlaneDistance() const
 {
@@ -1034,6 +986,14 @@ void Renderer::endObjectAnnotations()
 
     if (!objectAnnotations.empty())
     {
+        Renderer::PipelineState ps;
+        ps.blending = true;
+        ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+        ps.depthMask = true;
+        ps.depthTest = true;
+        ps.smoothLines = true;
+        setPipelineState(ps);
+
         renderAnnotations(objectAnnotations.begin(),
                           objectAnnotations.end(),
                           -depthPartitions[currentIntervalIndex].nearZ,
@@ -1046,47 +1006,17 @@ void Renderer::endObjectAnnotations()
 
 
 void Renderer::addObjectAnnotation(const celestia::MarkerRepresentation* markerRep,
-                                   const string& labelText,
+                                   std::string_view labelText,
                                    Color color,
-                                   const Vector3f& pos)
+                                   const Vector3f& pos,
+                                   LabelHorizontalAlignment halign,
+                                   LabelVerticalAlignment valign)
 {
     assert(objectAnnotationSetOpen);
     if (objectAnnotationSetOpen)
     {
-        addAnnotation(objectAnnotations, markerRep, labelText, color, pos, AlignCenter, VerticalAlignCenter);
+        addAnnotation(objectAnnotations, markerRep, labelText, color, pos, halign, valign);
     }
-}
-
-void
-Renderer::enableSmoothLines()
-{
-    if ((renderFlags & ShowSmoothLines) == 0)
-        return;
-
-    // enableBlending();
-#ifdef USE_HDR
-    setBlendingFactors(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
-#else
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#endif
-#ifndef GL_ES
-    glEnable(GL_LINE_SMOOTH);
-#endif
-    glLineWidth(getRasterizedLineWidth(1.0f));
-}
-
-void
-Renderer::disableSmoothLines()
-{
-    if ((renderFlags & Renderer::ShowSmoothLines) == 0)
-        return;
-
-    // disableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-#ifndef GL_ES
-    glDisable(GL_LINE_SMOOTH);
-#endif
-    glLineWidth(getScaleFactor());
 }
 
 Vector4f renderOrbitColor(const Body *body, bool selected, float opacity)
@@ -1098,86 +1028,61 @@ Vector4f renderOrbitColor(const Body *body, bool selected, float opacity)
         // Highlight the orbit of the selected object in red
         orbitColor = Renderer::SelectionOrbitColor;
     }
-    else if (body != nullptr && body->isOrbitColorOverridden())
+    else if (body == nullptr || !GetBodyFeaturesManager()->getOrbitColor(body, orbitColor))
     {
-        orbitColor = body->getOrbitColor();
-    }
-    else
-    {
-        int classification;
-        if (body != nullptr)
-            classification = body->getOrbitClassification();
-        else
-            classification = Body::Stellar;
+        BodyClassification classification = body != nullptr
+            ? body->getOrbitClassification()
+            : BodyClassification::Stellar;
 
         switch (classification)
         {
-        case Body::Moon:
+        case BodyClassification::Moon:
             orbitColor = Renderer::MoonOrbitColor;
             break;
-        case Body::MinorMoon:
+        case BodyClassification::MinorMoon:
             orbitColor = Renderer::MinorMoonOrbitColor;
             break;
-        case Body::Asteroid:
+        case BodyClassification::Asteroid:
             orbitColor = Renderer::AsteroidOrbitColor;
             break;
-        case Body::Comet:
+        case BodyClassification::Comet:
             orbitColor = Renderer::CometOrbitColor;
             break;
-        case Body::Spacecraft:
+        case BodyClassification::Spacecraft:
             orbitColor = Renderer::SpacecraftOrbitColor;
             break;
-        case Body::Stellar:
+        case BodyClassification::Stellar:
             orbitColor = Renderer::StarOrbitColor;
             break;
-        case Body::DwarfPlanet:
+        case BodyClassification::DwarfPlanet:
             orbitColor = Renderer::DwarfPlanetOrbitColor;
             break;
-        case Body::Planet:
+        case BodyClassification::Planet:
+            [[fallthrough]];
         default:
             orbitColor = Renderer::PlanetOrbitColor;
             break;
         }
     }
 
-#ifdef USE_HDR
-    return Vector4f(orbitColor.red(), orbitColor.green(), orbitColor.blue(), 1.0f - opacity * orbitColor.alpha());
-#else
     return Vector4f(orbitColor.red(), orbitColor.green(), orbitColor.blue(), opacity * orbitColor.alpha());
-#endif
 }
 
 void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
                            double t,
                            const Quaterniond& cameraOrientation,
-                           const Frustum& frustum,
+                           const math::Frustum& frustum,
                            float nearDist,
-                           float farDist,
-                           const Matrices& m)
+                           float farDist)
 {
-    ShaderProperties shadprop;
-    shadprop.texUsage = ShaderProperties::VertexColors;
-    bool lineAsTriangles = shouldDrawLineAsTriangles();
-    if (lineAsTriangles)
-        shadprop.texUsage |= ShaderProperties::LineAsTriangles;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
-    auto *prog = shaderManager->getShader(shadprop);
-    if (prog == nullptr)
-        return;
-
-    Body* body = orbitPath.body;
+    const Body* body = orbitPath.body;
     double nearZ = -nearDist;  // negate, becase z is into the screen in camera space
     double farZ = -farDist;
 
-    const Orbit* orbit = nullptr;
-    if (body != nullptr)
-        orbit = body->getOrbit(t);
-    else
-        orbit = orbitPath.star->getOrbit();
+    const auto* orbit = body != nullptr ? body->getOrbit(t) : orbitPath.star->getOrbit();
 
     CurvePlot* cachedOrbit = nullptr;
-    OrbitCache::iterator cached = orbitCache.find(orbit);
-    if (cached != orbitCache.end())
+    if (auto cached = orbitCache.find(orbit); cached != orbitCache.end())
     {
         cachedOrbit = cached->second;
         cachedOrbit->setLastUsed(frameCount);
@@ -1187,13 +1092,16 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
     if (cachedOrbit == nullptr)
     {
         double startTime = t;
-        int nSamples = detailOptions.orbitPathSamplePoints;
 
         // Adjust the number of samples used for aperiodic orbits--these aren't
         // true orbits, but are sampled trajectories, generally of spacecraft.
         // Better control is really needed--some sort of adaptive sampling would
         // be ideal.
-        if (!orbit->isPeriodic())
+        if (orbit->isPeriodic())
+        {
+            startTime = t - orbit->getPeriod();
+        }
+        else
         {
             double begin = 0.0, end = 0.0;
             orbit->getValidRange(begin, end);
@@ -1201,25 +1109,10 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
             if (begin != end)
             {
                 startTime = begin;
-                nSamples = (int) (orbit->getPeriod() * 100.0);
-                nSamples = max(min(nSamples, 1000), 100);
             }
-            else
-            {
-                // If the orbit is aperiodic and doesn't have a
-                // finite duration, we don't render it. A compromise
-                // would be to pick some time window centered at the
-                // current time, but we'd have to pick some arbitrary
-                // duration.
-                nSamples = 0;
-            }
-        }
-        else
-        {
-            startTime = t - orbit->getPeriod();
         }
 
-        cachedOrbit = new CurvePlot();
+        cachedOrbit = new CurvePlot(*this);
         cachedOrbit->setLastUsed(frameCount);
 
         OrbitSampler sampler;
@@ -1330,43 +1223,34 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
     // vertices into camera space.
     Affine3d modelview;
     {
-        Quaterniond orientation = Quaterniond::Identity();
-        if (body)
-        {
-            orientation = body->getOrbitFrame(t)->getOrientation(t);
-        }
-
+        auto orientation = body == nullptr ? Quaterniond::Identity() : body->getOrbitFrame(t)->getOrientation(t);
         modelview = cameraOrientation * Translation3d(orbitPath.origin) * orientation.conjugate();
     }
 
-    bool highlight;
-    if (body != nullptr)
-        highlight = highlightObject.body() == body;
-    else
-        highlight = highlightObject.star() == orbitPath.star;
+    bool highlight = body != nullptr ? highlightObject.body() == body : highlightObject.star() == orbitPath.star;
     Vector4f orbitColor = renderOrbitColor(body, highlight, orbitPath.opacity);
 
 #ifdef STIPPLED_LINES
     glLineStipple(3, 0x5555);
     glEnable(GL_LINE_STIPPLE);
 #endif
-    enableDepthTest();
 
     double subdivisionThreshold = pixelSize * 40.0;
 
     Eigen::Vector3d viewFrustumPlaneNormals[4];
-    for (int i = 0; i < 4; i++)
+    for (unsigned int i = 0; i < 4; i++)
     {
-        viewFrustumPlaneNormals[i] = frustum.plane(i).normal().cast<double>();
+        viewFrustumPlaneNormals[i] = frustum.plane(static_cast<math::FrustumPlane>(i)).normal().cast<double>();
     }
 
-    prog->use();
-    prog->setMVPMatrices(*m.projection);
-    if (lineAsTriangles)
-    {
-        prog->lineWidthX = getPointWidth();
-        prog->lineWidthY = getPointHeight();
-    }
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthTest = true;
+    ps.depthMask = false;
+    ps.smoothLines = true;
+    setPipelineState(ps);
+
     if (orbit->isPeriodic())
     {
         double period = orbit->getPeriod();
@@ -1380,7 +1264,7 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
                                 nearZ, farZ, viewFrustumPlaneNormals,
                                 subdivisionThreshold,
                                 windowStart, windowEnd,
-                                orbitColor, lineAsTriangles);
+                                orbitColor);
         }
         else
         {
@@ -1390,8 +1274,7 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
                                      windowStart, windowEnd,
                                      orbitColor,
                                      windowStart,
-                                     windowEnd - windowDuration * (1.0 - LinearFadeFraction),
-                                     lineAsTriangles);
+                                     windowEnd - windowDuration * (1.0 - LinearFadeFraction));
         }
     }
     else
@@ -1403,7 +1286,7 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
                                 nearZ, farZ, viewFrustumPlaneNormals,
                                 subdivisionThreshold,
                                 cachedOrbit->startTime(), t,
-                                orbitColor, lineAsTriangles);
+                                orbitColor);
         }
         else
         {
@@ -1411,11 +1294,10 @@ void Renderer::renderOrbit(const OrbitPathListEntry& orbitPath,
             cachedOrbit->render(modelview,
                                 nearZ, farZ, viewFrustumPlaneNormals,
                                 subdivisionThreshold,
-                                orbitColor, lineAsTriangles);
+                                orbitColor);
         }
     }
 
-    disableDepthTest();
 #ifdef STIPPLED_LINES
     glDisable(GL_LINE_STIPPLE);
 #endif
@@ -1432,15 +1314,34 @@ static Vector3d astrocentricPosition(const UniversalCoord& pos,
 }
 
 
-void Renderer::autoMag(float& faintestMag)
+void Renderer::autoMag(float& faintestMag, float zoom)
 {
-    float fieldCorr;
-    if (getProjectionMode() == ProjectionMode::FisheyeMode)
-        fieldCorr = 2.0f - 2000.0f / (windowHeight / (screenDpi / 25.4f / 3.78f) + 1000.0f); // larger window height = more stars to display
-    else
-        fieldCorr= 2.0f * FOV / (fov + FOV);
-    faintestMag = (float) (faintestAutoMag45deg * sqrt(fieldCorr));
+    float fieldCorr = getProjectionMode()->getFieldCorrection(zoom);
+    faintestMag = faintestAutoMag45deg * std::sqrt(fieldCorr);
     saturationMag = saturationMagNight * (1.0f + fieldCorr * fieldCorr);
+}
+
+
+static Color legacyTintColor(float temp)
+{
+    // If the star is sufficiently cool, change the light color
+    // from white.  Though our sun appears yellow, we still make
+    // it and all hotter stars emit white light, as this is the
+    // 'natural' light to which our eyes are accustomed.  We also
+    // assign a slight bluish tint to light from O and B type stars,
+    // though these will almost never have planets for their light
+    // to shine upon.
+    if (temp > 30000.0f)
+        return Color(0.8f, 0.8f, 1.0f);
+    else if (temp > 10000.0f)
+        return Color(0.9f, 0.9f, 1.0f);
+    else if (temp > 5400.0f)
+        return Color(1.0f, 1.0f, 1.0f);
+    else if (temp > 3900.0f)
+        return Color(1.0f, 0.9f, 0.8f);
+    else if (temp > 2000.0f)
+        return Color(1.0f, 0.7f, 0.7f);
+    return Color(1.0f, 0.4f, 0.4f);
 }
 
 
@@ -1452,8 +1353,15 @@ setupLightSources(const vector<const Star*>& nearStars,
                   const UniversalCoord& observerPos,
                   double t,
                   vector<LightSource>& lightSources,
-                  uint64_t renderFlags)
+                  float tintSaturation,
+                  const ColorTemperatureTable* tintColors)
 {
+    // Fade out the illumination from cool objects. Objects at the Draper
+    // point (798 K) should be visibly glowing, so set the minimum temperature
+    // for illumination to be slightly below this.
+    constexpr float DARK_POINT = 780.0f;
+    constexpr float FADE_POINT = 1000.0f;
+
     lightSources.clear();
 
     for (const auto star : nearStars)
@@ -1466,32 +1374,27 @@ setupLightSources(const vector<const Star*>& nearStars,
             ls.luminosity = star->getLuminosity();
             ls.radius = star->getRadius();
 
-            if ((renderFlags & Renderer::ShowTintedIllumination) != 0)
-            {
-                // If the star is sufficiently cool, change the light color
-                // from white.  Though our sun appears yellow, we still make
-                // it and all hotter stars emit white light, as this is the
-                // 'natural' light to which our eyes are accustomed.  We also
-                // assign a slight bluish tint to light from O and B type stars,
-                // though these will almost never have planets for their light
-                // to shine upon.
-                float temp = star->getTemperature();
-                if (temp > 30000.0f)
-                    ls.color = Color(0.8f, 0.8f, 1.0f);
-                else if (temp > 10000.0f)
-                    ls.color = Color(0.9f, 0.9f, 1.0f);
-                else if (temp > 5400.0f)
-                    ls.color = Color(1.0f, 1.0f, 1.0f);
-                else if (temp > 3900.0f)
-                    ls.color = Color(1.0f, 0.9f, 0.8f);
-                else if (temp > 2000.0f)
-                    ls.color = Color(1.0f, 0.7f, 0.7f);
-                else
-                    ls.color = Color(1.0f, 0.4f, 0.4f);
-            }
+            float temp = star->getTemperature();
+            if (temp <= DARK_POINT)
+                continue;
+
+            if (tintColors == nullptr)
+                ls.color = legacyTintColor(temp);
             else
             {
-                ls.color = Color(1.0f, 1.0f, 1.0f);
+                float fadeFactor = temp < FADE_POINT
+                    ? (temp - DARK_POINT) / (FADE_POINT - DARK_POINT)
+                    : 1.0f;
+
+                // Artificially decrease the luminosity below the fade point
+                // so that other light sources in the system may provide more
+                // illumination.
+                ls.luminosity *= fadeFactor;
+
+                // Use a variant of the blackbody colors with the whitepoint
+                // set to Sol being white, to ensure consistency of the Solar
+                // System textures.
+                ls.color = tintColors->lookupTintColor(temp, tintSaturation, fadeFactor);
             }
 
             lightSources.push_back(ls);
@@ -1506,7 +1409,7 @@ static void
 setupSecondaryLightSources(vector<SecondaryIlluminator>& secondaryIlluminators,
                            const vector<LightSource>& primaryIlluminators)
 {
-    float au2 = square(astro::kilometersToAU(1.0f));
+    constexpr float au2 = math::square(astro::kilometersToAU(1.0f));
 
     for (auto& i : secondaryIlluminators)
     {
@@ -1536,7 +1439,7 @@ void Renderer::renderItem(const RenderListEntry& rle,
                    rle.position,
                    rle.distance,
                    rle.appMag,
-                   observer.getTime(),
+                   observer,
                    nearPlaneDistance, farPlaneDistance,
                    m);
         break;
@@ -1555,6 +1458,7 @@ void Renderer::renderItem(const RenderListEntry& rle,
         renderCometTail(*rle.body,
                         rle.position,
                         observer,
+                        rle.radius,
                         rle.discSizeInPixels,
                         m);
         break;
@@ -1579,64 +1483,6 @@ void Renderer::render(const Observer& observer,
                       float faintestMagNight,
                       const Selection& sel)
 {
-#ifdef USE_HDR
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-
-    renderToTexture(observer, universe, faintestMagNight, sel);
-
-    //------------- Post processing from here ------------//
-    glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_TEXTURE_2D);
-    disableBlending();
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadMatrix(Ortho2D(0.0f, 1.0f, 0.0f, 1.0f));
-    glMatrixMode (GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    if (bloomEnabled)
-    {
-        renderToBlurTexture(0);
-        renderToBlurTexture(1);
-//        renderToBlurTexture(2);
-    }
-
-    drawSceneTexture();
-
-    enableBlending();
-    setBlendingFactors(GL_ONE, GL_ONE);
-
-#ifdef HDR_COMPRESS
-    // Assume luminance 1.0 mapped to 128 previously
-    // Compositing a 2nd copy doubles 128->255
-    drawSceneTexture();
-#endif
-
-    if (bloomEnabled)
-    {
-        drawBlur();
-    }
-
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-    glPopAttrib();
-#else
-    draw(observer, universe, faintestMagNight, sel);
-#endif
-}
-
-void Renderer::draw(const Observer& observer,
-                    const Universe& universe,
-                    float faintestMagNight,
-                    const Selection& sel)
-{
     // Get the observer's time
     double now = observer.getTime();
     realTime = observer.getRealTime();
@@ -1645,8 +1491,10 @@ void Renderer::draw(const Observer& observer,
     settingsChanged = false;
 
     // Compute the size of a pixel
-    setFieldOfView(radToDeg(observer.getFOV()));
-    pixelSize = calcPixelSize(fov, (float) windowHeight);
+    float zoom = observer.getZoom();
+    setFieldOfView(math::radToDeg(getProjectionMode()->getFOV(zoom)));
+    cosViewConeAngle = projectionMode->getViewConeAngleMax(zoom);
+    pixelSize = getProjectionMode()->getPixelSize(zoom);
 
     // Get the displayed surface texture set to use from the observer
     displayedSurface = observer.getDisplayedSurface();
@@ -1656,24 +1504,21 @@ void Renderer::draw(const Observer& observer,
     // Highlight the selected object
     highlightObject = sel;
 
-    m_cameraOrientation = observer.getOrientationf();
+    m_cameraOrientation = Quaterniond(m_cameraTransform) * observer.getOrientation();
 
     // Get the view frustum used for culling in camera space.
-    Frustum frustum(degToRad(fov), getAspectRatio(), MinNearPlaneDistance);
+    math::InfiniteFrustum frustum = projectionMode->getInfiniteFrustum(MinNearPlaneDistance, zoom);
 
     // Get the transformed frustum, used for culling in the astrocentric coordinate
     // system.
-    Frustum xfrustum(frustum);
-    xfrustum.transform(getCameraOrientation().conjugate().toRotationMatrix());
+    math::InfiniteFrustum xfrustum(frustum);
+    xfrustum.transform(getCameraOrientationf().conjugate().toRotationMatrix());
 
     // Set up the projection and modelview matrices.
     // We'll usethem for positioning star and planet labels.
-    float aspectRatio = getAspectRatio();
-    if (getProjectionMode() == Renderer::ProjectionMode::FisheyeMode)
-        m_projMatrix = Ortho(-aspectRatio, aspectRatio, -1.0f, 1.0f, NEAR_DIST, FAR_DIST);
-    else
-        m_projMatrix = Perspective(fov, aspectRatio, NEAR_DIST, FAR_DIST);
-    m_modelMatrix = Affine3f(getCameraOrientation()).matrix();
+    auto [nearZ, farZ] = projectionMode->getDefaultDepthRange();
+    buildProjectionMatrix(m_projMatrix, nearZ, farZ, observer.getZoom());
+    m_modelMatrix = Affine3f(getCameraOrientationf()).matrix();
     m_MVPMatrix = m_projMatrix * m_modelMatrix;
 
     depthSortedAnnotations.clear();
@@ -1693,7 +1538,7 @@ void Renderer::draw(const Observer& observer,
     // See if we want to use AutoMag.
     if ((renderFlags & ShowAutoMag) != 0)
     {
-        autoMag(faintestMag);
+        autoMag(faintestMag, zoom);
     }
     else
     {
@@ -1702,15 +1547,6 @@ void Renderer::draw(const Observer& observer,
     }
 
     faintestPlanetMag = faintestMag;
-#ifdef USE_HDR
-    float maxBodyMagPrev = saturationMag;
-    maxBodyMag = min(maxBodyMag, saturationMag);
-    vector<RenderListEntry>::iterator closestBody;
-    const Star *brightestStar = nullptr;
-    bool foundClosestBody   = false;
-    bool foundBrightestStar = false;
-#endif
-
     if ((renderFlags & (ShowSolarSystemObjects | ShowOrbits)) != 0)
     {
         buildNearSystemsLists(universe, observer, xfrustum, now);
@@ -1734,48 +1570,25 @@ void Renderer::draw(const Observer& observer,
     // maintain a minimum range of six magnitudes between faintest visible
     // and saturation; this keeps stars from popping in or out as the sun
     // sets or rises.
-#ifdef USE_HDR
-    brightnessScale = 1.0f / (faintestMag -  saturationMag);
-    exposurePrev = exposure;
-    float exposureNow = 1.f / (1.f+exp((faintestMag - saturationMag + DEFAULT_EXPOSURE)/2.f));
-    exposure = exposurePrev + (exposureNow - exposurePrev) * (1.f - exp(-1.f/(15.f * EXPOSURE_HALFLIFE)));
-    brightnessScale /= exposure;
-#else
     if (faintestMag - saturationMag >= 6.0f)
         brightnessScale = 1.0f / (faintestMag -  saturationMag);
     else
         brightnessScale = 0.1667f;
-#endif
 
-#ifdef DEBUG_HDR_TONEMAP
-    HDR_LOG <<
-//        "brightnessScale = " << brightnessScale <<
-        "faint = "    << faintestMag << ", " <<
-        "sat = "      << saturationMag << ", " <<
-        "exposure = " << (exposure+brightPlus) << endl;
-#endif
+    brightnessScale *= corrFac;
+    if (starStyle == ScaledDiscStars)
+        brightnessScale *= 2.0f;
 
-#ifdef HDR_COMPRESS
-    ambientColor = Color(ambientLightLevel*.5f, ambientLightLevel*.5f, ambientLightLevel*.5f);
-#else
+    // Calculate saturation magnitude
+    satPoint = faintestMag - (1.0f - brightnessBias) / brightnessScale;
+
     ambientColor = Color(ambientLightLevel, ambientLightLevel, ambientLightLevel);
-#endif
 
-#ifdef USE_HDR
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-#else
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-#endif
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glLineWidth(getScaleFactor());
-
-    disableDepthMask();
 
     // Render sky grids first--these will always be in the background
-    enableSmoothLines();
     renderSkyGrids(observer);
-    disableSmoothLines();
-    enableBlending();
 
     // Render deep sky objects
     if ((renderFlags & ShowDeepSpaceObjects) != 0 && universe.getDSOCatalog() != nullptr)
@@ -1784,19 +1597,10 @@ void Renderer::draw(const Observer& observer,
     }
 
     // Render stars
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
-#endif
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-
     if ((renderFlags & ShowStars) != 0 && universe.getStarCatalog() != nullptr)
     {
         renderPointStars(*universe.getStarCatalog(), faintestMag, observer);
     }
-
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-#endif
 
     // Translate the camera before rendering the asterisms and boundaries
     // Set up the camera for star rendering; the units of this phase
@@ -1804,7 +1608,7 @@ void Renderer::draw(const Observer& observer,
     Vector3f observerPosLY = -observer.getPosition().offsetFromLy(Vector3f::Zero());
 
     Matrix4f projection = getProjectionMatrix();
-    Matrix4f modelView = getModelViewMatrix() * vecgl::translate(observerPosLY);
+    Matrix4f modelView = getModelViewMatrix() * math::translate(observerPosLY);
 
     Matrices asterismMVP = { &projection, &modelView };
 
@@ -1824,7 +1628,7 @@ void Renderer::draw(const Observer& observer,
 
     if ((renderFlags & ShowMarkers) != 0)
     {
-        markersToAnnotations(*universe.getMarkers(), observer, now);
+        markersToAnnotations(universe.getMarkers(), observer, now);
     }
 
     // Draw the selection cursor
@@ -1846,23 +1650,16 @@ void Renderer::draw(const Observer& observer,
     // Sort the orbit paths
     sort(orbitPathList.begin(), orbitPathList.end());
 
-#ifdef USE_HDR
-    adjustEclipsedStarExposure(now);
-#endif
-
 #ifndef GL_ES
     glPolygonMode(GL_FRONT_AND_BACK, (GLenum) renderMode);
 #endif
-
-    enableDepthTest();
-    enableDepthMask();
 
     int nIntervals = buildDepthPartitions();
     renderSolarSystemObjects(observer, nIntervals, now);
 
     renderForegroundAnnotations(FontNormal);
 
-    if (!selectionVisible && (renderFlags & ShowMarkers))
+    if (showSelectionPointer && !selectionVisible && (renderFlags & ShowMarkers) != 0)
     {
         renderSelectionPointer(observer, now, xfrustum, sel);
     }
@@ -1870,91 +1667,66 @@ void Renderer::draw(const Observer& observer,
 #ifndef GL_ES
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 #endif
-
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    disableBlending();
-    enableDepthMask();
 }
 
-void renderPoint(const Renderer &renderer,
-                 const Vector3f &position,
-                 const Color &color,
-                 float size,
-                 bool useSprite,
-                 const Matrices &m)
+static Eigen::Vector3f
+calculateQuadCenter(const Eigen::Quaternionf &cameraOrientation,
+                    const Eigen::Vector3f &position,
+                    float radius)
 {
-    auto *prog = renderer.getShaderManager().getShader("star");
-    if (prog == nullptr)
-        return;
+    Matrix3f m = cameraOrientation.conjugate().toRotationMatrix();
 
-    prog->use();
-    prog->samplerParam("starTex") = 0;
-    prog->setMVPMatrices(*m.projection, *m.modelview);
+    // Offset the glare sprite so that it lies in front of the object
+    Vector3f direction = position.normalized();
 
-#ifndef GL_ES
-    glEnable(GL_POINT_SPRITE);
-    glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
-#endif
-    // Workaround for macOS to pass a single vertex coord
-    glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                          3, GL_FLOAT, GL_FALSE, sizeof(position), position.data());
-
-    glVertexAttrib(CelestiaGLProgram::ColorAttributeIndex, color);
-    glVertexAttrib1f(CelestiaGLProgram::PointSizeAttributeIndex, useSprite ? size : renderer.getScreenDpi() / 96.0f);
-
-    glDrawArrays(GL_POINTS, 0, 1);
-
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-
-#ifndef GL_ES
-    glDisable(GL_VERTEX_PROGRAM_POINT_SIZE);
-    glDisable(GL_POINT_SPRITE);
-#endif
+    // Position the sprite on the the line between the viewer and the
+    // object, and on a plane normal to the view direction.
+    return position + direction * (radius / (m * Vector3f::UnitZ()).dot(direction));
 }
 
-void renderLargePoint(Renderer &renderer,
-                      const Vector3f &position,
-                      const Color &color,
-                      float size,
-                      const Matrices &mvp)
+void
+Renderer::calculatePointSize(float appMag,
+                             float size,
+                             float &discSize,
+                             float &alpha,
+                             float &glareSize,
+                             float &glareAlpha) const
 {
-    auto *prog = renderer.getShaderManager().getShader("largestar");
-    if (prog == nullptr)
-        return;
+    alpha = std::max(0.0f, (faintestMag - appMag) * brightnessScale + brightnessBias);
 
-    // Draw billboard for large points
-    prog->use();
-    prog->samplerParam("starTex") = 0;
-    prog->setMVPMatrices(*mvp.projection, *mvp.modelview);
-    prog->vec4Param("color") = color.toVector4();
-    prog->vec3Param("center") = position;
-    prog->floatParam("pointWidth") = size / renderer.getWindowWidth() * 2.0f;
-    prog->floatParam("pointHeight") = size / renderer.getWindowHeight() * 2.0f;
-
-    auto &vo = renderer.getVertexObject(VOType::LargeStar, GL_ARRAY_BUFFER, 0, GL_STATIC_DRAW);
-    vo.bind();
-    if (!vo.initialized())
+    discSize = size;
+    if (starStyle == ScaledDiscStars)
     {
-        const float texCoords[] = {
-            // offset     // texCoords
-            -0.5f,  0.5f, 0.0f, 0.0f,
-            -0.5f, -0.5f, 0.0f, 1.0f,
-             0.5f, -0.5f, 1.0f, 1.0f,
+        if (alpha > 1.0f)
+        {
+            float discScale = std::min(MaxScaledDiscStarSize, pow(2.0f, 0.3f * (satPoint - appMag)));
+            discSize *= std::max(1.0f, discScale);
 
-            -0.5f,  0.5f, 0.0f, 0.0f,
-             0.5f, -0.5f, 1.0f, 1.0f,
-             0.5f,  0.5f, 1.0f, 0.0f,
-        };
-        vo.allocate(sizeof(texCoords), texCoords);
-        vo.setVertices(2, GL_FLOAT, false, 4 * sizeof(float), 0);
-        vo.setTextureCoords(2, GL_FLOAT, false, 4 * sizeof(float), 2 * sizeof(float));
+            glareAlpha = std::min(0.5f, discScale / 4.0f);
+            glareSize = discSize * 3.0f;
+
+            alpha = 1.0f;
+        }
+        else
+        {
+            glareSize = glareAlpha = 0.0f;
+        }
     }
-
-    vo.draw(GL_TRIANGLES, 6);
-    vo.unbind();
+    else
+    {
+        if (alpha > 1.0f)
+        {
+            float discScale = std::min(100.0f, satPoint - appMag + 2.0f);
+            glareAlpha = std::min(GlareOpacity, (discScale - 2.0f) / 4.0f);
+            glareSize = 2.0f * discScale * size;
+            alpha = 1.0f;
+        }
+        else
+        {
+            glareSize = glareAlpha = 0.0f;
+        }
+    }
 }
-
 
 // If the an object occupies a pixel or less of screen space, we don't
 // render its mesh at all and just display a starlike point instead.
@@ -1965,101 +1737,52 @@ void renderLargePoint(Renderer &renderer,
 void Renderer::renderObjectAsPoint(const Vector3f& position,
                                    float radius,
                                    float appMag,
-                                   float _faintestMag,
                                    float discSizeInPixels,
                                    const Color &color,
                                    bool useHalos,
                                    bool emissive,
                                    const Matrices &mvp)
 {
-    const float maxSize = MaxScaledDiscStarSize;
-    float maxDiscSize = (starStyle == ScaledDiscStars) ? maxSize : 1.0f;
+    const bool useScaledDiscs = starStyle == ScaledDiscStars;
+    float maxDiscSize = useScaledDiscs ? MaxScaledDiscStarSize : 1.0f;
     float maxBlendDiscSize = maxDiscSize + 3.0f;
-
-    bool useScaledDiscs = starStyle == ScaledDiscStars;
 
     if (discSizeInPixels < maxBlendDiscSize || useHalos)
     {
-        float alpha = 1.0f;
         float fade = 1.0f;
-        float size = BaseStarDiscSize * screenDpi / 96;
-#ifdef USE_HDR
-        float fieldCorr = 2.0f * FOV/(fov + FOV);
-        float satPoint = saturationMagNight * (1.0f + fieldCorr * fieldCorr);
-        satPoint += brightPlus;
-#else
-        float satPoint = _faintestMag - (1.0f - brightnessBias) / brightnessScale;
-#endif
-
         if (discSizeInPixels > maxDiscSize)
         {
-            fade = (maxBlendDiscSize - discSizeInPixels) /
-                (maxBlendDiscSize - maxDiscSize);
-            if (fade > 1)
-                fade = 1;
+            fade = std::min(1.0f, (maxBlendDiscSize - discSizeInPixels) /
+                                  (maxBlendDiscSize - maxDiscSize));
         }
 
-        alpha = (_faintestMag - appMag) * brightnessScale * 2.0f + brightnessBias;
-        if (alpha < 0.0f)
-            alpha = 0.0f;
+        float scale = static_cast<float>(screenDpi) / 96.0f;
+        float pointSize, alpha, glareSize, glareAlpha;
+        calculatePointSize(appMag, BaseStarDiscSize * scale, pointSize, alpha, glareSize, glareAlpha);
 
-        float pointSize = size;
-        float glareSize = 0.0f;
-        float glareAlpha = 0.0f;
-        if (useScaledDiscs)
-        {
-            if (alpha > 1.0f)
-            {
-                float discScale = min(maxSize, (float) pow(2.0f, 0.3f * (satPoint - appMag)));
-                pointSize *= max(1.0f, discScale);
-
-                glareAlpha = min(0.5f, discScale / 4.0f);
-                if (discSizeInPixels > maxSize)
-                    glareAlpha = min(glareAlpha, (maxSize - discSizeInPixels) / maxSize + 1.0f);
-                glareSize = pointSize * 3.0f;
-
-                alpha = 1.0f;
-            }
-        }
-        else
-        {
-            if (alpha > 1.0f)
-            {
-                float discScale = min(100.0f, satPoint - appMag + 2.0f);
-                glareAlpha = min(GlareOpacity, (discScale - 2.0f) / 4.0f);
-                glareSize = pointSize * discScale * 2.0f ;
-                if (emissive)
-                    glareSize = max(glareSize, pointSize * discSizeInPixels / (screenDpi / 96.0f) * 3.0f);
-            }
-        }
+        if (useScaledDiscs && discSizeInPixels > MaxScaledDiscStarSize)
+            glareAlpha = std::min(glareAlpha, (MaxScaledDiscStarSize - discSizeInPixels) / MaxScaledDiscStarSize + 1.0f);
 
         alpha *= fade;
         if (!emissive)
-        {
-            glareSize = max(glareSize, pointSize * discSizeInPixels / (screenDpi / 96.0f) * 3.0f);
             glareAlpha *= fade;
-        }
 
-        Matrix3f m = m_cameraOrientation.conjugate().toRotationMatrix();
-        Vector3f center = position;
+        if (glareSize != 0.0f)
+            glareSize = std::max(glareSize, pointSize * discSizeInPixels / scale * 3.0f);
 
-        // Offset the glare sprite so that it lies in front of the object
-        Vector3f direction = center.normalized();
+        Renderer::PipelineState ps;
+        ps.blending = true;
+        ps.blendFunc = {GL_SRC_ALPHA, GL_ONE};
+        ps.depthTest = true;
+        setPipelineState(ps);
 
-        // Position the sprite on the the line between the viewer and the
-        // object, and on a plane normal to the view direction.
-        center = center + direction * (radius / (m * Vector3f::UnitZ()).dot(direction));
-
-        enableDepthTest();
-        disableDepthMask();
-
-        bool useSprites = starStyle != PointStars;
-        if (useSprites)
+        if (starStyle != PointStars)
             gaussianDiscTex->bind();
+
         if (pointSize > gl::maxPointSize)
-            renderLargePoint(*this, center, {color, alpha}, pointSize, mvp);
+            m_largeStarRenderer->render(position, {color, alpha}, pointSize, mvp);
         else
-            renderPoint(*this, center, {color, alpha}, pointSize, useSprites, mvp);
+            pointStarVertexBuffer->addStar(position, {color, alpha}, pointSize);
 
         // If the object is brighter than magnitude 1, add a halo around it to
         // make it appear more brilliant.  This is a hack to compensate for the
@@ -2069,329 +1792,42 @@ void Renderer::renderObjectAsPoint(const Vector3f& position,
         // with halos.
         if (useHalos && glareAlpha > 0.0f)
         {
+            Eigen::Vector3f center = calculateQuadCenter(getCameraOrientationf(), position, radius);
             gaussianGlareTex->bind();
             if (glareSize > gl::maxPointSize)
-                renderLargePoint(*this, center, {color, glareAlpha}, glareSize, mvp);
+                m_largeStarRenderer->render(center, {color, glareAlpha}, glareSize, mvp);
             else
-                renderPoint(*this, center, {color, glareAlpha}, glareSize, true, mvp);
+                glareVertexBuffer->addStar(center, {color, glareAlpha}, glareSize);
         }
     }
-}
-
-
-// Used to sort light sources in order of decreasing irradiance
-struct LightIrradiancePredicate
-{
-    int unused;
-
-    LightIrradiancePredicate() = default;
-
-    bool operator()(const DirectionalLight& l0,
-                    const DirectionalLight& l1) const
-    {
-        return (l0.irradiance > l1.irradiance);
-    }
-};
-
-
-void Renderer::renderEllipsoidAtmosphere(const Atmosphere& atmosphere,
-                                         const Vector3f& center,
-                                         const Quaternionf& orientation,
-                                         const Vector3f& semiAxes,
-                                         const Vector3f& sunDirection,
-                                         const LightingState& ls,
-                                         float pixSize,
-                                         bool lit,
-                                         const Matrices &m)
-{
-    if (atmosphere.height == 0.0f)
-        return;
-
-    ShaderProperties shadprop;
-    shadprop.texUsage = ShaderProperties::VertexColors;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
-    auto *prog = shaderManager->getShader(shadprop);
-    if (prog == nullptr)
-        return;
-
-    disableDepthMask();
-
-    // Gradually fade in the atmosphere if it's thickness on screen is just
-    // over one pixel.
-    float fade = clamp(pixSize - 2);
-
-    Matrix3f rot = orientation.toRotationMatrix();
-    Matrix3f irot = orientation.conjugate().toRotationMatrix();
-
-    Vector3f eyePos = Vector3f::Zero();
-    float radius = semiAxes.maxCoeff();
-    Vector3f eyeVec = center - eyePos;
-    eyeVec = rot * eyeVec;
-    double centerDist = eyeVec.norm();
-
-    float height = atmosphere.height / radius;
-    Vector3f recipSemiAxes = semiAxes.cwiseInverse();
-
-    // ellipDist is not the true distance from the surface unless the
-    // planet is spherical.  Computing the true distance requires finding
-    // the roots of a sixth degree polynomial, and isn't actually what we
-    // want anyhow since the atmosphere region is just the planet ellipsoid
-    // multiplied by a uniform scale factor.  The value that we do compute
-    // is the distance to the surface along a line from the eye position to
-    // the center of the ellipsoid.
-    float ellipDist = (eyeVec.cwiseProduct(recipSemiAxes)).norm() - 1.0f;
-    bool within = ellipDist < height;
-
-    // Adjust the tesselation of the sky dome/ring based on distance from the
-    // planet surface.
-    int nSlices = MaxSkySlices;
-    if (ellipDist < 0.25f)
-    {
-        nSlices = MinSkySlices + max(0, (int) ((ellipDist / 0.25f) * (MaxSkySlices - MinSkySlices)));
-        nSlices &= ~1;
-    }
-
-    int nRings = min(1 + (int) pixSize / 5, 6);
-    int nHorizonRings = nRings;
-    if (within)
-        nRings += 12;
-
-    float horizonHeight = height;
-    if (within)
-    {
-        if (ellipDist <= 0.0f)
-            horizonHeight = 0.0f;
-        else
-            horizonHeight *= max((float) pow(ellipDist / height, 0.33f), 0.001f);
-    }
-
-    Vector3f e = -eyeVec;
-    Vector3f e_ = e.cwiseProduct(recipSemiAxes);
-    float ee = e_.dot(e_);
-
-    // Compute the cosine of the altitude of the sun.  This is used to compute
-    // the degree of sunset/sunrise coloration.
-    float cosSunAltitude = 0.0f;
-    {
-        // Check for a sun either directly behind or in front of the viewer
-        float cosSunAngle = (float) (sunDirection.dot(e) / centerDist);
-        if (cosSunAngle < -1.0f + 1.0e-6f)
-        {
-            cosSunAltitude = 0.0f;
-        }
-        else if (cosSunAngle > 1.0f - 1.0e-6f)
-        {
-            cosSunAltitude = 0.0f;
-        }
-        else
-        {
-            Vector3f v = (rot * -sunDirection) * (float) centerDist;
-            Vector3f tangentPoint = center +
-                irot * ellipsoidTangent(recipSemiAxes,
-                                        v,
-                                        e, e_, ee);
-            Vector3f tangentDir = (tangentPoint - eyePos).normalized();
-            cosSunAltitude = sunDirection.dot(tangentDir);
-        }
-    }
-
-    Vector3f normal = eyeVec;
-    normal = normal / (float) centerDist;
-
-    Vector3f uAxis, vAxis;
-    if (abs(normal.x()) < abs(normal.y()) && abs(normal.x()) < abs(normal.z()))
-    {
-        uAxis = Vector3f::UnitX().cross(normal);
-    }
-    else if (abs(eyeVec.y()) < abs(normal.z()))
-    {
-        uAxis = Vector3f::UnitY().cross(normal);
-    }
-    else
-    {
-        uAxis = Vector3f::UnitZ().cross(normal);
-    }
-    uAxis.normalize();
-    vAxis = uAxis.cross(normal);
-
-    // Compute the contour of the ellipsoid
-    for (int i = 0; i <= nSlices; i++)
-    {
-        // We want rays with an origin at the eye point and tangent to the the
-        // ellipsoid.
-        float theta = (float) i / (float) nSlices * 2 * (float) PI;
-        Vector3f w = (float) cos(theta) * uAxis + (float) sin(theta) * vAxis;
-        w = w * (float) centerDist;
-
-        Vector3f toCenter = ellipsoidTangent(recipSemiAxes, w, e, e_, ee);
-        skyContour[i].v = irot * toCenter;
-        skyContour[i].centerDist = skyContour[i].v.norm();
-        skyContour[i].eyeDir = skyContour[i].v + (center - eyePos);
-        skyContour[i].eyeDist = skyContour[i].eyeDir.norm();
-        skyContour[i].eyeDir.normalize();
-
-        float skyCapDist = (float) sqrt(square(skyContour[i].eyeDist) +
-                                        square(horizonHeight * radius));
-        skyContour[i].cosSkyCapAltitude = skyContour[i].eyeDist / skyCapDist;
-    }
-
-
-    Vector3f botColor = atmosphere.lowerColor.toVector3();
-    Vector3f topColor = atmosphere.upperColor.toVector3();
-    Vector3f sunsetColor = atmosphere.sunsetColor.toVector3();
-
-    if (within)
-    {
-        Vector3f skyColor = atmosphere.skyColor.toVector3();
-        if (ellipDist < 0.0f)
-            topColor = skyColor;
-        else
-            topColor = skyColor + (topColor - skyColor) * (ellipDist / height);
-    }
-
-    if (ls.nLights == 0 && lit)
-    {
-        botColor = topColor = sunsetColor = Vector3f::Zero();
-    }
-
-    Vector3f zenith = (skyContour[0].v + skyContour[nSlices / 2].v);
-    zenith.normalize();
-    zenith *= skyContour[0].centerDist * (1.0f + horizonHeight * 2.0f);
-
-    float minOpacity = within ? (1.0f - ellipDist / height) * 0.75f : 0.0f;
-    float sunset = cosSunAltitude < 0.9f ? 0.0f : (cosSunAltitude - 0.9f) * 10.0f;
-
-    // Build the list of vertices
-    SkyVertex* vtx = skyVertices;
-    for (int i = 0; i <= nRings; i++)
-    {
-        float h = min(1.0f, (float) i / (float) nHorizonRings);
-        auto hh = (float) sqrt(h);
-        float u = i <= nHorizonRings ? 0.0f :
-            (float) (i - nHorizonRings) / (float) (nRings - nHorizonRings);
-        float r = lerp(h, 1.0f - (horizonHeight * 0.05f), 1.0f + horizonHeight);
-        float atten = 1.0f - hh;
-
-        for (int j = 0; j < nSlices; j++)
-        {
-            Vector3f v;
-            if (i <= nHorizonRings)
-                v = skyContour[j].v * r;
-            else
-                v = (skyContour[j].v * (1.0f - u) + zenith * u) * r;
-            Vector3f p = center + v;
-
-            Vector3f viewDir = p.normalized();
-            float cosSunAngle = viewDir.dot(sunDirection);
-            float cosAltitude = viewDir.dot(skyContour[j].eyeDir);
-            float brightness = 1.0f;
-            float coloration = 0.0f;
-            if (lit)
-            {
-                if (sunset > 0.0f && cosSunAngle > 0.7f && cosAltitude > 0.98f)
-                {
-                    coloration =  (1.0f / 0.30f) * (cosSunAngle - 0.70f);
-                    coloration *= 50.0f * (cosAltitude - 0.98f);
-                    coloration *= sunset;
-                }
-
-                cosSunAngle = skyContour[j].v.dot(sunDirection) / skyContour[j].centerDist;
-                if (cosSunAngle > -0.2f)
-                {
-                    if (cosSunAngle < 0.3f)
-                        brightness = (cosSunAngle + 0.2f) * 2.0f;
-                    else
-                        brightness = 1.0f;
-                }
-                else
-                {
-                    brightness = 0.0f;
-                }
-            }
-
-            vtx->x = p.x();
-            vtx->y = p.y();
-            vtx->z = p.z();
-
-            atten = 1.0f - hh;
-            Vector3f color = (1.0f - hh) * botColor + hh * topColor;
-            brightness *= minOpacity + (1.0f - minOpacity) * fade * atten;
-            if (coloration != 0.0f)
-                color = (1.0f - coloration) * color + coloration * sunsetColor;
-
-#ifdef HDR_COMPRESS
-            brightness *= 0.5f;
-#endif
-            Color(brightness * color.x(),
-                  brightness * color.y(),
-                  brightness * color.z(),
-                  fade * (minOpacity + (1.0f - minOpacity)) * atten).get(vtx->color);
-            vtx++;
-        }
-    }
-
-    // Create the index list
-    int index = 0;
-    for (int i = 0; i < nRings; i++)
-    {
-        int baseVertex = i * nSlices;
-        for (int j = 0; j < nSlices; j++)
-        {
-            skyIndices[index++] = baseVertex + j;
-            skyIndices[index++] = baseVertex + nSlices + j;
-        }
-        skyIndices[index++] = baseVertex;
-        skyIndices[index++] = baseVertex + nSlices;
-    }
-
-    glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                          3, GL_FLOAT, GL_FALSE,
-                          sizeof(SkyVertex), &skyVertices[0].x);
-    glEnableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
-    glVertexAttribPointer(CelestiaGLProgram::ColorAttributeIndex,
-                          4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(SkyVertex),
-                          static_cast<void*>(&skyVertices[0].color));
-    prog->use();
-    prog->setMVPMatrices(*m.projection, *m.modelview);
-    for (int i = 0; i < nRings; i++)
-    {
-        glDrawElements(GL_TRIANGLE_STRIP,
-                       (nSlices + 1) * 2,
-                       GL_UNSIGNED_INT,
-                       &skyIndices[(nSlices + 1) * 2 * i]);
-    }
-
-    glDisableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
 }
 
 
 static void renderSphereUnlit(const RenderInfo& ri,
-                              const Frustum& frustum,
+                              const math::Frustum& frustum,
                               const Matrices &m,
-                              const Renderer *r)
+                              Renderer *r)
 {
-    Texture* textures[MAX_SPHERE_MESH_TEXTURES];
-    int nTextures = 0;
+    boost::container::static_vector<Texture*, LODSphereMesh::MAX_SPHERE_MESH_TEXTURES> textures;
 
     ShaderProperties shadprop;
+    shadprop.texUsage = TexUsage::TextureCoordTransform;
 
     // Set up the textures used by this object
     if (ri.baseTex != nullptr)
     {
-        shadprop.texUsage = ShaderProperties::DiffuseTexture;
-        textures[nTextures++] = ri.baseTex;
+        shadprop.texUsage |= TexUsage::DiffuseTexture;
+        textures.push_back(ri.baseTex);
     }
     if (ri.nightTex != nullptr)
     {
-        shadprop.texUsage |= ShaderProperties::NightTexture;
-        textures[nTextures++] = ri.nightTex;
+        shadprop.texUsage |= TexUsage::NightTexture;
+        textures.push_back(ri.nightTex);
     }
     if (ri.overlayTex != nullptr)
     {
-        shadprop.texUsage |= ShaderProperties::OverlayTexture;
-        textures[nTextures++] = ri.overlayTex;
+        shadprop.texUsage |= TexUsage::OverlayTexture;
+        textures.push_back(ri.overlayTex);
     }
 
     // Get a shader for the current rendering configuration
@@ -2404,23 +1840,27 @@ static void renderSphereUnlit(const RenderInfo& ri,
     prog->textureOffset = 0.0f;
     prog->ambientColor = ri.color.toVector3();
     prog->opacity = 1.0f;
-#ifdef USE_HDR
-    prog->nightLightScale = ri.nightLightScale;
-#endif
-    g_lodSphere->render(frustum, ri.pixWidth, textures, nTextures);
+
+    Renderer::PipelineState ps;
+    ps.depthMask = true;
+    ps.depthTest = true;
+    r->setPipelineState(ps);
+
+    g_lodSphere->render(frustum, ri.pixWidth,
+                        textures.data(), static_cast<int>(textures.size()), prog);
 }
 
 
 static void renderCloudsUnlit(const RenderInfo& ri,
-                              const Frustum& frustum,
+                              const math::Frustum& frustum,
                               Texture *cloudTex,
                               float cloudTexOffset,
                               const Matrices &m,
-                              const Renderer *r)
+                              Renderer *r)
 {
     ShaderProperties shadprop;
-    shadprop.texUsage = ShaderProperties::DiffuseTexture;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
+    shadprop.texUsage = TexUsage::DiffuseTexture | TexUsage::TextureCoordTransform;
+    shadprop.lightModel = LightingModel::UnlitModel;
 
     // Get a shader for the current rendering configuration
     auto* prog = r->getShaderManager().getShader(shadprop);
@@ -2430,7 +1870,13 @@ static void renderCloudsUnlit(const RenderInfo& ri,
     prog->setMVPMatrices(*m.projection, *m.modelview);
     prog->textureOffset = cloudTexOffset;
 
-    g_lodSphere->render(frustum, ri.pixWidth, &cloudTex, 1);
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthTest = true;
+    r->setPipelineState(ps);
+
+    g_lodSphere->render(frustum, ri.pixWidth, &cloudTex, 1, prog);
 }
 
 void
@@ -2438,10 +1884,8 @@ Renderer::locationsToAnnotations(const Body& body,
                                  const Vector3d& bodyPosition,
                                  const Quaterniond& bodyOrientation)
 {
-    const vector<Location*>* locations = body.getLocations();
-
-    if (locations == nullptr)
-        return;
+    assert(GetBodyFeaturesManager()->hasLocations(&body));
+    auto locations = GetBodyFeaturesManager()->getLocations(&body);
 
     Vector3f semiAxes = body.getSemiAxes();
 
@@ -2452,91 +1896,97 @@ Renderer::locationsToAnnotations(const Body& body,
     Vector3d viewRayOrigin = bodyOrientation * -bodyCenter;
     double labelOffset = 0.0001;
 
-    Vector3f vn  = getCameraOrientation().conjugate() * -Vector3f::UnitZ();
+    Vector3f vn  = getCameraOrientationf().conjugate() * -Vector3f::UnitZ();
     Vector3d viewNormal = vn.cast<double>();
 
-    Ellipsoidd bodyEllipsoid(semiAxes.cast<double>());
+    math::Ellipsoidd bodyEllipsoid(semiAxes.cast<double>());
 
     Matrix3d bodyMatrix = bodyOrientation.conjugate().toRotationMatrix();
 
     for (const auto location : *locations)
     {
         auto featureType = location->getFeatureType();
-        if ((featureType & locationFilter) != 0)
+        if ((featureType & locationFilter) == 0)
+            continue;
+
+        // Get the position of the location with respect to the planet center
+        Vector3f ppos = location->getPosition();
+
+        // Compute the bodycentric position of the location
+        Vector3d locPos = ppos.cast<double>();
+
+        // Get the planetocentric position of the label.  Add a slight scale factor
+        // to keep the point from being exactly on the surface.
+        Vector3d pcLabelPos = locPos * (1.0 + labelOffset);
+
+        // Get the camera space label position
+        Vector3d labelPos = bodyCenter + bodyMatrix * locPos;
+
+        float effSize = location->getImportance();
+        if (effSize < 0.0f)
+            effSize = location->getSize();
+
+        if (float pixSize = effSize / (float) (labelPos.norm() * pixelSize);
+            pixSize <= minFeatureSize || labelPos.dot(viewNormal) <= 0.0)
         {
-            // Get the position of the location with respect to the planet center
-            Vector3f ppos = location->getPosition();
-
-            // Compute the bodycentric position of the location
-            Vector3d locPos = ppos.cast<double>();
-
-            // Get the planetocentric position of the label.  Add a slight scale factor
-            // to keep the point from being exactly on the surface.
-            Vector3d pcLabelPos = locPos * (1.0 + labelOffset);
-
-            // Get the camera space label position
-            Vector3d labelPos = bodyCenter + bodyMatrix * locPos;
-
-            float effSize = location->getImportance();
-            if (effSize < 0.0f)
-                effSize = location->getSize();
-
-            float pixSize = effSize / (float) (labelPos.norm() * pixelSize);
-
-            if (pixSize > minFeatureSize && labelPos.dot(viewNormal) > 0.0)
-            {
-                // Labels on non-ellipsoidal bodies need special handling; the
-                // ellipsoid visibility test will always fail for them, since they
-                // will lie on the surface of the mesh, which is inside the
-                // the bounding ellipsoid. The following code projects location positions
-                // onto the bounding sphere.
-                if (!body.isEllipsoid())
-                {
-                    double r = locPos.norm();
-                    if (r < boundingRadius)
-                        pcLabelPos = locPos * (boundingRadius * 1.01 / r);
-                }
-
-                double t = 0.0;
-
-                // Test for an intersection of the eye-to-location ray with
-                // the planet ellipsoid.  If we hit the planet first, then
-                // the label is obscured by the planet.  An exact calculation
-                // for irregular objects would be too expensive, and the
-                // ellipsoid approximation works reasonably well for them.
-                Ray3d testRay(viewRayOrigin, pcLabelPos - viewRayOrigin);
-                bool hit = testIntersection(testRay, bodyEllipsoid, t);
-
-                if (!hit || t >= 1.0)
-                {
-                    // Calculate the intersection of the eye-to-label ray with the plane perpendicular to
-                    // the view normal that touches the front of the object's bounding sphere
-                    double planetZ = viewNormal.dot(bodyCenter) - boundingRadius;
-                    if (planetZ < -nearDist * 1.001)
-                        planetZ = -nearDist * 1.001;
-                    double z = viewNormal.dot(labelPos);
-                    labelPos *= planetZ / z;
-
-                    celestia::MarkerRepresentation* locationMarker = nullptr;
-                    if (featureType & Location::City)
-                        locationMarker = &cityRep;
-                    else if (featureType & (Location::LandingSite | Location::Observatory))
-                        locationMarker = &observatoryRep;
-                    else if (featureType & (Location::Crater | Location::Patera))
-                        locationMarker = &craterRep;
-                    else if (featureType & (Location::Mons | Location::Tholus))
-                        locationMarker = &mountainRep;
-                    else if (featureType & (Location::EruptiveCenter))
-                        locationMarker = &genericLocationRep;
-
-                    Color labelColor = location->isLabelColorOverridden() ? location->getLabelColor() : LocationLabelColor;
-                    addObjectAnnotation(locationMarker,
-                                        location->getName(true),
-                                        labelColor,
-                                        labelPos.cast<float>());
-                }
-            }
+            continue;
         }
+
+        // Labels on non-ellipsoidal bodies need special handling; the
+        // ellipsoid visibility test will always fail for them, since they
+        // will lie on the surface of the mesh, which is inside the
+        // the bounding ellipsoid. The following code projects location positions
+        // onto the bounding sphere.
+        if (!body.isEllipsoid())
+        {
+            double r = locPos.norm();
+            if (r < boundingRadius)
+                pcLabelPos = locPos * (boundingRadius * 1.01 / r);
+        }
+
+        double t = 0.0;
+
+        // Test for an intersection of the eye-to-location ray with
+        // the planet ellipsoid.  If we hit the planet first, then
+        // the label is obscured by the planet.  An exact calculation
+        // for irregular objects would be too expensive, and the
+        // ellipsoid approximation works reasonably well for them.
+        Eigen::ParametrizedLine<double, 3> testRay(viewRayOrigin, pcLabelPos - viewRayOrigin);
+
+        if (bool hit = testIntersection(testRay, bodyEllipsoid, t);
+            hit && t < 1.0)
+        {
+            continue;
+        }
+
+        // Calculate the intersection of the eye-to-label ray with the plane perpendicular to
+        // the view normal that touches the front of the object's bounding sphere
+        double planetZ = std::max(viewNormal.dot(bodyCenter) - boundingRadius, -nearDist * 1.001);
+        double z = viewNormal.dot(labelPos);
+        labelPos *= planetZ / z;
+
+        const celestia::MarkerRepresentation* locationMarker = nullptr;
+        if (featureType & Location::City)
+            locationMarker = &cityRep;
+        else if (featureType & (Location::LandingSite | Location::Observatory))
+            locationMarker = &observatoryRep;
+        else if (featureType & (Location::Crater | Location::Patera))
+            locationMarker = &craterRep;
+        else if (featureType & (Location::Mons | Location::Tholus))
+            locationMarker = &mountainRep;
+        else if (featureType & (Location::EruptiveCenter))
+            locationMarker = &genericLocationRep;
+
+        Color labelColor = location->isLabelColorOverridden()
+            ? location->getLabelColor()
+            : LocationLabelColor;
+
+        addObjectAnnotation(locationMarker,
+                            location->getName(true),
+                            labelColor,
+                            labelPos.cast<float>(),
+                            LabelHorizontalAlignment::Start,
+                            LabelVerticalAlignment::Bottom);
     }
 }
 
@@ -2566,9 +2016,7 @@ estimateReflectedLightFraction(const Vector3d& toSun,
 {
     // Theta is half the arc length visible to the reflector
     double d = toObject.norm();
-    auto cosTheta = (float) (radius / d);
-    if (cosTheta > 0.999f)
-        cosTheta = 0.999f;
+    float cosTheta = std::min((float) (radius / d), 0.999f);
 
     // Phi is the angle between the light vector and receiver-to-reflector vector.
     // cos(phi) is thus the illumination at the sub-point. The horizon points are
@@ -2579,13 +2027,13 @@ estimateReflectedLightFraction(const Vector3d& toSun,
     //   cos(phi + theta) = cos(phi) * cos(theta) - sin(phi) * sin(theta)
 
     // s = sin(phi) * sin(theta)
-    auto s = (float) sqrt((1.0f - cosPhi * cosPhi) * (1.0f - cosTheta * cosTheta));
+    float s = std::sqrt((1.0f - cosPhi * cosPhi) * (1.0f - cosTheta * cosTheta));
 
     float cosPhi1 = cosPhi * cosTheta - s;  // cos(phi + theta)
     float cosPhi2 = cosPhi * cosTheta + s;  // cos(phi - theta)
 
     // Calculate a weighted average of illumination at the three points
-    return (2.0f * max(cosPhi, 0.0f) + max(cosPhi1, 0.0f) + max(cosPhi2, 0.0f)) * 0.25f;
+    return (2.0f * std::max(cosPhi, 0.0f) + std::max(cosPhi1, 0.0f) + std::max(cosPhi2, 0.0f)) * 0.25f;
 }
 
 
@@ -2596,20 +2044,11 @@ setupObjectLighting(const vector<LightSource>& suns,
                     const Vector3f& objScale,
                     const Vector3f& objPosition_eye,
                     bool isNormalized,
-#ifdef USE_HDR
-                    const float faintestMag,
-                    const float saturationMag,
-                    const float appMag,
-#endif
                     LightingState& ls)
 {
     unsigned int nLights = min(MaxLights, (unsigned int) suns.size());
     if (nLights == 0)
         return;
-
-#ifdef USE_HDR
-    float exposureFactor = (faintestMag - appMag)/(faintestMag - saturationMag + 0.001f);
-#endif
 
     unsigned int i;
     for (i = 0; i < nLights; i++)
@@ -2641,7 +2080,7 @@ setupObjectLighting(const vector<LightSource>& suns,
         for (auto& illuminator : secondaryIlluminators)
         {
             Vector3d toIllum = illuminator.position_v - objpos;  // reflector-to-object vector
-            float distSquared = (float) toIllum.squaredNorm() / square(illuminator.radius);
+            float distSquared = (float) toIllum.squaredNorm() / math::square(illuminator.radius);
 
             if (distSquared > 0.01f)
             {
@@ -2695,7 +2134,8 @@ setupObjectLighting(const vector<LightSource>& suns,
     }
     else if (nLights > 2)
     {
-        sort(ls.lights, ls.lights + nLights, LightIrradiancePredicate());
+        sort(ls.lights, ls.lights + nLights,
+             [](const auto &l0, const auto &l1) { return l0.irradiance > l1.irradiance; });
     }
 
     // Compute the total irradiance
@@ -2713,7 +2153,7 @@ setupObjectLighting(const vector<LightSource>& suns,
     //   buffers is enabled.
     float minVisibleFraction = 1.0f / 10000.0f;
     float minDisplayableValue = 1.0f / 255.0f;
-    auto gamma = (float) (log(minDisplayableValue) / log(minVisibleFraction));
+    float gamma = log(minDisplayableValue) / log(minVisibleFraction);
     float minVisibleIrradiance = minVisibleFraction * totalIrradiance;
 
     Matrix3f m = objOrientation.toRotationMatrix();
@@ -2724,12 +2164,7 @@ setupObjectLighting(const vector<LightSource>& suns,
     ls.nLights = 0;
     for (i = 0; i < nLights && ls.lights[i].irradiance > minVisibleIrradiance; i++)
     {
-#ifdef USE_HDR
-        ls.lights[i].irradiance *= exposureFactor / totalIrradiance;
-#else
-        ls.lights[i].irradiance =
-            (float) pow(ls.lights[i].irradiance / totalIrradiance, gamma);
-#endif
+        ls.lights[i].irradiance = pow(ls.lights[i].irradiance / totalIrradiance, gamma);
 
         // Compute the direction of the light in object space
         ls.lights[i].direction_obj = m * ls.lights[i].direction_eye;
@@ -2760,7 +2195,7 @@ setupObjectLighting(const vector<LightSource>& suns,
 
 void Renderer::renderObject(const Vector3f& pos,
                             float distance,
-                            double now,
+                            const Observer& observer,
                             float nearPlaneDistance,
                             float farPlaneDistance,
                             RenderProperties& obj,
@@ -2768,13 +2203,14 @@ void Renderer::renderObject(const Vector3f& pos,
                             const Matrices &m)
 {
     RenderInfo ri;
+    double now = observer.getTime();
 
     float altitude = distance - obj.radius;
     float discSizeInPixels = obj.radius / (max(nearPlaneDistance, altitude) * pixelSize);
 
     ri.sunDir_eye = Vector3f::UnitY();
     ri.sunDir_obj = Vector3f::UnitY();
-    ri.sunColor = Color(0.0f, 0.0f, 0.0f);
+    ri.sunColor = Color::Black;
     if (ls.nLights > 0)
     {
         ri.sunDir_eye = ls.lights[0].direction_eye;
@@ -2782,19 +2218,13 @@ void Renderer::renderObject(const Vector3f& pos,
         ri.sunColor   = ls.lights[0].color;// * ls.lights[0].intensity;
     }
 
-    // Enable depth buffering
-    enableDepthTest();
-    enableDepthMask();
-
-    disableBlending();
-
     // Get the object's geometry; nullptr indicates that object is an
     // ellipsoid.
     Geometry* geometry = nullptr;
     if (obj.geometry != InvalidResource)
     {
         // This is a model loaded from a file
-        geometry = GetGeometryManager()->find(obj.geometry);
+        geometry = engine::GetGeometryManager()->find(obj.geometry);
     }
 
     // Get the textures . . .
@@ -2825,14 +2255,14 @@ void Renderer::renderObject(const Vector3f& pos,
         geometryScale = obj.radius;
         scaleFactors = obj.radius * obj.semiAxes;
         ringsScaleFactor = obj.radius * obj.semiAxes.maxCoeff();
-        ri.pointScale = 2.0f * obj.radius / pixelSize * screenDpi / 96.0f;
+        ri.pointScale = 2.0f * obj.radius / pixelSize;
     }
     else
     {
         geometryScale = obj.geometryScale;
         scaleFactors = Vector3f::Constant(geometryScale);
         ringsScaleFactor = geometryScale;
-        ri.pointScale = 2.0f * geometryScale / pixelSize * screenDpi / 96.0f;
+        ri.pointScale = 2.0f * geometryScale / pixelSize;
     }
     // Apply the modelview transform for the object
     Affine3f transform = Translation3f(pos) * obj.orientation.conjugate();
@@ -2853,7 +2283,7 @@ void Renderer::renderObject(const Vector3f& pos,
     ri.eyeDir_obj = -(planetRotation * pos).normalized();
     ri.eyePos_obj = -(planetRotation * (pos.cwiseQuotient(scaleFactors)));
 
-    ri.orientation = getCameraOrientation() * obj.orientation.conjugate();
+    ri.orientation = getCameraOrientationf() * obj.orientation.conjugate();
 
     ri.pixWidth = discSizeInPixels;
 
@@ -2868,9 +2298,6 @@ void Renderer::renderObject(const Vector3f& pos,
     ri.specularColor = obj.surface->specularColor;
     ri.specularPower = obj.surface->specularPower;
     ri.lunarLambert = obj.surface->lunarLambert;
-#ifdef USE_HDR
-    ri.nightLightScale = obj.surface->nightLightRadiance * exposure * 1.e5f * .5f;
-#endif
 
     // See if the surface should be lit
     bool lit = (obj.surface->appearanceFlags & Surface::Emissive) == 0;
@@ -2878,7 +2305,7 @@ void Renderer::renderObject(const Vector3f& pos,
     // Compute the inverse model/view matrix
     Affine3f invModelView = obj.orientation *
                             Translation3f(-pos / obj.radius) *
-                            getCameraOrientation().conjugate();
+                            getCameraOrientationf().conjugate();
     Matrix4f invMV = invModelView.matrix();
 
     // The sphere rendering code uses the view frustum to determine which
@@ -2898,7 +2325,7 @@ void Renderer::renderObject(const Vector3f& pos,
         {
             // Include a fudge factor to eliminate overaggressive clipping
             // due to limited floating point precision
-            frustumFarPlane = (float) sqrt(square(d) - square(eradius)) * 1.1f;
+            frustumFarPlane = std::sqrt(math::square(d) - math::square(eradius)) * 1.1f;
         }
         else
         {
@@ -2914,8 +2341,7 @@ void Renderer::renderObject(const Vector3f& pos,
                 // If there's an atmosphere, we need to move the far plane
                 // out so that the clouds and atmosphere shell aren't clipped.
                 float atmosphereRadius = eradius + atmosphereHeight;
-                frustumFarPlane += (float) sqrt(square(atmosphereRadius) -
-                                                square(eradius));
+                frustumFarPlane += std::sqrt(math::square(atmosphereRadius) - math::square(eradius));
             }
         }
     }
@@ -2925,9 +2351,7 @@ void Renderer::renderObject(const Vector3f& pos,
     // normalized coordinate system where the 1 unit = 1 planet
     // radius (for an ellipsoidal planet, radius is taken to be
     // largest semiaxis.)
-    Frustum viewFrustum(degToRad(fov),
-                        getAspectRatio(),
-                        nearPlaneDistance / radius, frustumFarPlane / radius);
+    auto viewFrustum = projectionMode->getFrustum(nearPlaneDistance / radius, frustumFarPlane / radius, observer.getZoom());
     viewFrustum.transform(invMV);
 
     // Get cloud layer parameters
@@ -2947,7 +2371,7 @@ void Renderer::renderObject(const Vector3f& pos,
                 cloudNormalMap = atmosphere->cloudNormalMap.find(textureResolution);
         }
         if (atmosphere->cloudSpeed != 0.0f)
-            cloudTexOffset = (float) (-pfmod(now * atmosphere->cloudSpeed / (2 * PI), 1.0));
+            cloudTexOffset = (float) (-math::pfmod(now * atmosphere->cloudSpeed * 0.5 * celestia::numbers::inv_pi, 1.0));
     }
 
     if (obj.geometry == InvalidResource)
@@ -3010,12 +2434,11 @@ void Renderer::renderObject(const Vector3f& pos,
         segmentSizeInPixels = 2.0f * obj.rings->outerRadius / (max(nearPlaneDistance, altitude) * pixelSize);
         if (distance <= obj.rings->innerRadius)
         {
-            renderRings_GLSL(*obj.rings, ri, ls,
-                             radius, 1.0f - obj.semiAxes.y(),
-                             textureResolution,
-                             (renderFlags & ShowRingShadows) != 0 && lit,
-                             segmentSizeInPixels,
-                             ringsMVP, this);
+            m_ringRenderer->renderRings(*obj.rings, ri, ls,
+                                        radius, 1.0f - obj.semiAxes.y(),
+                                        (renderFlags & ShowRingShadows) != 0 && lit,
+                                        segmentSizeInPixels,
+                                        ringsMVP, true);
         }
     }
 
@@ -3031,14 +2454,14 @@ void Renderer::renderObject(const Vector3f& pos,
         {
             thicknessInPixels = atmosphere->height /
                 ((distance - radius) * pixelSize);
-            fade = clamp(thicknessInPixels - 2);
+            fade = std::clamp(thicknessInPixels - 2.0f, 0.0f, 1.0f);
         }
         else
         {
             fade = 1.0f;
         }
 
-        if (fade > 0 && (renderFlags & ShowAtmospheres) != 0)
+        if (fade > 0 && (renderFlags & ShowAtmospheres) != 0 && atmosphere->height > 0.0f)
         {
             // Only use new atmosphere code in OpenGL 2.0 path when new style parameters are defined.
             // TODO: convert old style atmopshere parameters
@@ -3046,28 +2469,29 @@ void Renderer::renderObject(const Vector3f& pos,
             {
                 float atmScale = 1.0f + atmosphere->height / radius;
 
-                renderAtmosphere_GLSL(ri, ls,
-                                      atmosphere,
-                                      radius * atmScale,
-                                      obj.orientation,
-                                      viewFrustum,
-                                      planetMVP, this);
+                m_atmosphereRenderer->render(
+                    ri,
+                    *atmosphere,
+                    ls,
+                    obj.orientation,
+                    radius * atmScale,
+                    viewFrustum,
+                    planetMVP);
             }
             else
             {
-                Matrix4f mv = vecgl::rotate(getCameraOrientation());
-                enableBlending();
-                setBlendingFactors(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-                renderEllipsoidAtmosphere(*atmosphere,
-                                          pos,
-                                          obj.orientation,
-                                          scaleFactors,
-                                          ri.sunDir_eye,
-                                          ls,
-                                          thicknessInPixels,
-                                          lit,
-                                          { m.projection, &mv });
+                Eigen::Matrix4f modelView = math::rotate(getCameraOrientationf());
+                Matrices mvp = { m.projection, &modelView };
+                m_atmosphereRenderer->renderLegacy(
+                    *atmosphere,
+                    ls,
+                    pos,
+                    obj.orientation,
+                    scaleFactors,
+                    ri.sunDir_eye,
+                    thicknessInPixels,
+                    lit,
+                    mvp);
             }
         }
 
@@ -3075,7 +2499,7 @@ void Renderer::renderObject(const Vector3f& pos,
         if (cloudTex != nullptr)
         {
             float cloudScale = 1.0f + atmosphere->cloudHeight / radius;
-            Matrix4f cmv = vecgl::scale(planetMV, cloudScale);
+            Matrix4f cmv = math::scale(planetMV, cloudScale);
             Matrices mvp = { m.projection, &cmv };
 
             // If we're beneath the cloud level, render the interior of
@@ -3083,10 +2507,7 @@ void Renderer::renderObject(const Vector3f& pos,
             if (distance - radius < atmosphere->cloudHeight)
                 glFrontFace(GL_CW);
 
-            disableDepthMask();
             cloudTex->bind();
-            enableBlending();
-            setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
             // Cloud layers can be trouble for the depth buffer, since they tend
             // to be very close to the surface of a planet relative to the radius
@@ -3118,7 +2539,6 @@ void Renderer::renderObject(const Vector3f& pos,
             }
 
             glDisable(GL_POLYGON_OFFSET_FILL);
-            enableDepthMask();
             glFrontFace(GL_CCW);
         }
     }
@@ -3134,19 +2554,13 @@ void Renderer::renderObject(const Vector3f& pos,
 
         if (distance > obj.rings->innerRadius)
         {
-            disableDepthMask();
-            renderRings_GLSL(*obj.rings, ri, ls,
-                             radius, 1.0f - obj.semiAxes.y(),
-                             textureResolution,
-                             (renderFlags & ShowRingShadows) != 0 && lit,
-                             segmentSizeInPixels,
-                             ringsMVP, this);
+            m_ringRenderer->renderRings(*obj.rings, ri, ls,
+                                        radius, 1.0f - obj.semiAxes.y(),
+                                        (renderFlags & ShowRingShadows) != 0 && lit,
+                                        segmentSizeInPixels,
+                                        ringsMVP, false);
         }
     }
-
-    disableDepthTest();
-    disableDepthMask();
-    enableBlending();
 }
 
 
@@ -3156,8 +2570,6 @@ bool Renderer::testEclipse(const Body& receiver,
                            unsigned int lightIndex,
                            double now)
 {
-    const DirectionalLight& light = lightingState.lights[lightIndex];
-    LightingState::EclipseShadowVector& shadows = *lightingState.shadows[lightIndex];
     bool isReceiverShadowed = false;
 
     // Ignore situations where the shadow casting body is much smaller than
@@ -3166,9 +2578,13 @@ bool Renderer::testEclipse(const Body& receiver,
     // generate correct shadows in this case.
     if (caster.getRadius() >= receiver.getRadius() * MinRelativeOccluderRadius &&
         caster.hasVisibleGeometry() &&
+        util::is_set(caster.getClassification(), bodyVisibilityMask) &&
         caster.extant(now) &&
         caster.isEllipsoid())
     {
+        const DirectionalLight& light = lightingState.lights[lightIndex];
+        LightingState::EclipseShadowVector& shadows = *lightingState.shadows[lightIndex];
+
         // All of the eclipse related code assumes that both the caster
         // and receiver are spherical.  Irregular receivers will work more
         // or less correctly, but casters that are sufficiently non-spherical
@@ -3215,8 +2631,8 @@ bool Renderer::testEclipse(const Body& receiver,
         Vector3d lightToCasterDir = posCaster - lightPosition;
         Vector3d receiverToCasterDir = posReceiver - posCaster;
 
-        double dist = distance(posReceiver,
-                               Ray3d(posCaster, lightToCasterDir));
+        double dist = math::distance(posReceiver,
+                                     Eigen::ParametrizedLine<double, 3>(posCaster, lightToCasterDir));
         if (dist < R && lightToCasterDir.dot(receiverToCasterDir) > 0.0)
         {
             Vector3d sunDir = lightToCasterDir.normalized();
@@ -3234,7 +2650,7 @@ bool Renderer::testEclipse(const Body& receiver,
             // 1. For annular eclipses and transits, it is less than 1.
             shadow.umbraRadius = caster.getRadius() *
                 (appOccluderRadius - appSunRadius) / appOccluderRadius;
-            shadow.maxDepth = std::min(1.0f, square(appOccluderRadius / appSunRadius));
+            shadow.maxDepth = std::min(1.0f, math::square(appOccluderRadius / appSunRadius));
             shadow.caster = &caster;
 
             // Ignore transits that don't produce a visible shadow.
@@ -3246,12 +2662,13 @@ bool Renderer::testEclipse(const Body& receiver,
 
         // If the caster has a ring system, see if it casts a shadow on the receiver.
         // Ring shadows are only supported in the OpenGL 2.0 path.
-        if (caster.getRings())
+        const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
+        if (auto rings = bodyFeaturesManager->getRings(&caster); rings != nullptr)
         {
             bool shadowed = false;
 
             // The shadow volume of the rings is an oblique circular cylinder
-            if (dist < caster.getRings()->outerRadius + receiver.getRadius())
+            if (dist < rings->outerRadius + receiver.getRadius())
             {
                 // Possible intersection, but it depends on the orientation of the
                 // rings.
@@ -3273,7 +2690,7 @@ bool Renderer::testEclipse(const Body& receiver,
                     Vector3d shadowPlaneNormal = v.normalized().cross(shadowDirection);
                     Hyperplane<double, 3> shadowPlane(shadowPlaneNormal, posCaster - posReceiver);
                     double minDistance = receiver.getRadius() +
-                        caster.getRings()->outerRadius * ringPlaneNormal.dot(shadowDirection);
+                        rings->outerRadius * ringPlaneNormal.dot(shadowDirection);
                     if (abs(shadowPlane.signedDistance(Vector3d::Zero())) < minDistance)
                     {
                         // TODO: Implement this test and only set shadowed to true if it passes
@@ -3286,7 +2703,7 @@ bool Renderer::testEclipse(const Body& receiver,
                     RingShadow& shadow = lightingState.ringShadows[lightIndex];
                     shadow.origin = dir.cast<float>();
                     shadow.direction = shadowDirection.cast<float>();
-                    shadow.ringSystem = caster.getRings();
+                    shadow.ringSystem = rings;
                     shadow.casterOrientation = casterOrientation.cast<float>();
                 }
             }
@@ -3314,20 +2731,21 @@ void Renderer::renderPlanet(Body& body,
     float maxDiscSize = (starStyle == ScaledDiscStars) ? MaxScaledDiscStarSize : 1.0f;
     if (discSizeInPixels >= maxDiscSize && body.hasVisibleGeometry())
     {
-        RenderProperties rp;
+        auto bodyFeaturesManager = GetBodyFeaturesManager();
 
+        RenderProperties rp;
         if (displayedSurface.empty())
         {
-            rp.surface = const_cast<Surface*>(&body.getSurface());
+            rp.surface = &body.getSurface();
         }
         else
         {
-            rp.surface = body.getAlternateSurface(displayedSurface);
+            rp.surface = bodyFeaturesManager->getAlternateSurface(&body, displayedSurface);
             if (rp.surface == nullptr)
-                rp.surface = const_cast<Surface*>(&body.getSurface());
+                rp.surface = &body.getSurface();
         }
-        rp.atmosphere = body.getAtmosphere();
-        rp.rings = body.getRings();
+        rp.atmosphere = bodyFeaturesManager->getAtmosphere(&body);
+        rp.rings = bodyFeaturesManager->getRings(&body);
         rp.radius = body.getRadius();
         rp.geometry = body.getGeometry();
         rp.semiAxes = body.getSemiAxes() * (1.0f / rp.radius);
@@ -3338,14 +2756,14 @@ void Renderer::renderPlanet(Body& body,
 
         rp.orientation = body.getGeometryOrientation() * q.cast<float>();
 
-        if (body.getLocations() != nullptr && (labelMode & LocationLabels) != 0)
-            body.computeLocations();
+        if ((labelMode & LocationLabels) != 0)
+            bodyFeaturesManager->computeLocations(&body);
 
         Vector3f scaleFactors;
         bool isNormalized = false;
-        Geometry* geometry = nullptr;
+        const Geometry* geometry = nullptr;
         if (rp.geometry != InvalidResource)
-            geometry = GetGeometryManager()->find(rp.geometry);
+            geometry = engine::GetGeometryManager()->find(rp.geometry);
         if (geometry == nullptr || geometry->isNormalized())
         {
             scaleFactors = rp.semiAxes * rp.radius;
@@ -3363,15 +2781,10 @@ void Renderer::renderPlanet(Body& body,
                             scaleFactors,
                             pos,
                             isNormalized,
-#ifdef USE_HDR
-                            faintestMag,
-                            DEFAULT_EXPOSURE + brightPlus, //exposure + brightPlus,
-                            appMag,
-#endif
                             lights);
         assert(lights.nLights <= MaxLights);
 
-        lights.ambientColor = ambientColor;
+        lights.ambientColor = ambientColor.toVector3();
 
         // Clear out the list of eclipse shadows
         for (unsigned int li = 0; li < lights.nLights; li++)
@@ -3382,13 +2795,13 @@ void Renderer::renderPlanet(Body& body,
 
 
         // Add ring shadow records for each light
-        if (body.getRings() != nullptr &&
+        if (rp.rings != nullptr &&
             (renderFlags & ShowPlanetRings) != 0 &&
             (renderFlags & ShowRingShadows) != 0)
         {
             for (unsigned int li = 0; li < lights.nLights; li++)
             {
-                lights.ringShadows[li].ringSystem = body.getRings();
+                lights.ringShadows[li].ringSystem = rp.rings;
                 lights.ringShadows[li].casterOrientation = q.cast<float>();
                 lights.ringShadows[li].origin = Vector3f::Zero();
                 lights.ringShadows[li].direction = -lights.lights[li].position.normalized().cast<float>();
@@ -3396,16 +2809,13 @@ void Renderer::renderPlanet(Body& body,
         }
 
         // Calculate eclipse circumstances
-        if ((renderFlags & ShowEclipseShadows) != 0 &&
-            body.getSystem() != nullptr)
+        if ((renderFlags & ShowEclipseShadows) != 0 && body.getSystem() != nullptr)
         {
-            PlanetarySystem* system = body.getSystem();
-            if (system->getPrimaryBody() == nullptr)
+            if (const auto *system = body.getSystem(); system->getPrimaryBody() == nullptr)
             {
                 // The body is a planet.  Check for eclipse shadows
                 // from all of its satellites.
-                PlanetarySystem* satellites = body.getSatellites();
-                if (satellites != nullptr)
+                if (const auto *satellites = body.getSatellites(); satellites != nullptr)
                 {
                     int nSatellites = satellites->getSystemSize();
                     for (unsigned int li = 0; li < lights.nLights; li++)
@@ -3431,7 +2841,7 @@ void Renderer::renderPlanet(Body& body,
                         // Traverse up the hierarchy so that any parent objects
                         // of the parent are also considered (TODO: their child
                         // objects will not be checked for shadows.)
-                        Body* planet = system->getPrimaryBody();
+                        const Body* planet = system->getPrimaryBody();
                         while (planet != nullptr)
                         {
                             testEclipse(body, *planet, lights, li, now);
@@ -3476,7 +2886,7 @@ void Renderer::renderPlanet(Body& body,
                 float ringWidth = rings->outerRadius - rings->innerRadius;
                 float projectedRingSize = std::abs(lights.lights[li].direction_obj.dot(lights.ringPlaneNormal)) * ringWidth;
                 float projectedRingSizeInPixels = projectedRingSize / (max(nearPlaneDistance, altitude) * pixelSize);
-                Texture* ringsTex = rings->texture.find(textureResolution);
+                const Texture* ringsTex = rings->texture.find(textureResolution);
                 if (ringsTex != nullptr)
                 {
                     // Calculate the approximate distance from the shadowed object to the rings
@@ -3535,11 +2945,11 @@ void Renderer::renderPlanet(Body& body,
             }
         }
 
-        renderObject(pos, distance, now,
+        renderObject(pos, distance, observer,
                      nearPlaneDistance, farPlaneDistance,
                      rp, lights, m);
 
-        if (body.getLocations() != nullptr && (labelMode & LocationLabels) != 0)
+        if (bodyFeaturesManager->hasLocations(&body) && (labelMode & LocationLabels) != 0)
         {
             // Set up location markers for this body
             using namespace celestia;
@@ -3556,25 +2966,18 @@ void Renderer::renderPlanet(Body& body,
         }
     }
 
-    enableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
-#endif
-
     if (body.isVisibleAsPoint())
     {
-        renderObjectAsPoint(pos,
-                            body.getRadius(),
-                            appMag,
-                            faintestMag,
-                            discSizeInPixels,
-                            body.getSurface().color,
-                            false, false, m);
+        if (float maxCoeff = body.getSurface().color.toVector3().maxCoeff(); maxCoeff > 0.0f) // ignore [ 0 0 0 ]; used by old addons to make objects not get rendered as point
+        {
+            renderObjectAsPoint(pos,
+                                body.getRadius(),
+                                appMag,
+                                discSizeInPixels,
+                                body.getSurface().color * (1.0f / maxCoeff), // normalize point color; 'darkness' is handled by size of point determined by GeomAlbedo.
+                                false, false, m);
+        }
     }
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-#endif
 }
 
 
@@ -3582,7 +2985,7 @@ void Renderer::renderStar(const Star& star,
                           const Vector3f& pos,
                           float distance,
                           float appMag,
-                          double now,
+                          const Observer& observer,
                           float nearPlaneDistance,
                           float farPlaneDistance,
                           const Matrices &m)
@@ -3590,7 +2993,7 @@ void Renderer::renderStar(const Star& star,
     if (!star.getVisibility())
         return;
 
-    Color color = colorTemp->lookupColor(star.getTemperature());
+    Color color = starColors.lookupColor(star.getTemperature());
     float radius = star.getRadius();
     float discSizeInPixels = radius / (distance * pixelSize);
 
@@ -3619,7 +3022,6 @@ void Renderer::renderStar(const Star& star,
         rp.semiAxes = star.getEllipsoidSemiAxes();
         rp.geometry = star.getGeometry();
 
-#ifndef USE_HDR
         Atmosphere atmosphere;
 
         // Use atmosphere effect to give stars a fuzzy fringe
@@ -3637,46 +3039,23 @@ void Renderer::renderStar(const Star& star,
         {
             rp.atmosphere = nullptr;
         }
-#else
-        rp.atmosphere = nullptr;
-#endif
 
-        rp.orientation = star.getRotationModel()->orientationAtTime(now).cast<float>();
+        rp.orientation = star.getRotationModel()->orientationAtTime(observer.getTime()).cast<float>();
 
-        renderObject(pos, distance, now,
+        renderObject(pos, distance, observer,
                      nearPlaneDistance, farPlaneDistance,
                      rp, LightingState(), m);
     }
 
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
-#endif
-
     renderObjectAsPoint(pos,
                         star.getRadius(),
                         appMag,
-                        faintestMag,
                         discSizeInPixels,
                         color,
                         star.hasCorona(), true,
                         m);
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-#endif
 }
 
-
-static const int MaxCometTailPoints = 120;
-static const int CometTailSlices = 48;
-struct CometTailVertex
-{
-    Vector3f point;
-    Vector3f normal;
-    float brightness;
-};
-
-static CometTailVertex cometTailVertices[CometTailSlices * MaxCometTailPoints];
 
 // Compute a rough estimate of the visible length of the dust tail.
 // TODO: This is old code that needs to be rewritten. For one thing,
@@ -3693,195 +3072,11 @@ static float cometDustTailLength(float distanceToSun,
 void Renderer::renderCometTail(const Body& body,
                                const Vector3f& pos,
                                const Observer& observer,
+                               float dustTailLength,
                                float discSizeInPixels,
                                const Matrices &m)
 {
-    auto prog = shaderManager->getShader("comet");
-    if (prog == nullptr)
-        return;
-
-    double now = observer.getTime();
-
-    Vector3f cometPoints[MaxCometTailPoints];
-    Vector3d pos0 = body.getOrbit(now)->positionAtTime(now);
-#if 0
-    Vector3d pos1 = body.getOrbit(now)->positionAtTime(now - 0.01);
-    Vector3d vd = pos1 - pos0;
-#endif
-    double t = now;
-
-    float distanceFromSun, irradiance_max = 0.0f;
-
-    // Adjust the amount of triangles used for the comet tail based on
-    // the screen size of the comet.
-    float lod = min(1.0f, max(0.2f, discSizeInPixels / 1000.0f));
-    auto nTailPoints = (int) (MaxCometTailPoints * lod);
-    auto nTailSlices = (int) (CometTailSlices * lod);
-
-    // Find the sun with the largest irrradiance of light onto the comet
-    // as function of the comet's position;
-    // irradiance = sun's luminosity / square(distanceFromSun);
-    Vector3d sunPos(Vector3d::Zero());
-    for (const auto star : nearStars)
-    {
-        if (star->getVisibility())
-        {
-            Vector3d p = star->getPosition(t).offsetFromKm(observer.getPosition());
-            distanceFromSun = (float) (pos.cast<double>() - p).norm();
-            float irradiance = star->getBolometricLuminosity() / square(distanceFromSun);
-
-            if (irradiance > irradiance_max)
-            {
-                irradiance_max = irradiance;
-                sunPos = p;
-            }
-        }
-    }
-
-    float fadeDistance = 1.0f / (float) (COMET_TAIL_ATTEN_DIST_SOL * sqrt(irradiance_max));
-
-    // direction to sun with dominant light irradiance:
-    Vector3f sunDir = (pos.cast<double>() - sunPos).cast<float>().normalized();
-
-    float dustTailLength = cometDustTailLength((float) pos0.norm(), body.getRadius());
-    float dustTailRadius = dustTailLength * 0.1f;
-
-    Vector3f origin = -sunDir * (body.getRadius() * 100);
-
-    int i;
-    for (i = 0; i < nTailPoints; i++)
-    {
-        float alpha = (float) i / (float) nTailPoints;
-        alpha = alpha * alpha;
-        cometPoints[i] = origin + sunDir * (dustTailLength * alpha);
-    }
-
-    // We need three axes to define the coordinate system for rendering the
-    // comet.  The first axis is the sun-to-comet direction, and the other
-    // two are chose orthogonal to each other and the primary axis.
-    Vector3f v = (cometPoints[1] - cometPoints[0]).normalized();
-    Quaternionf q = body.getEclipticToEquatorial(t).cast<float>();
-    Vector3f u = v.unitOrthogonal();
-    Vector3f w = u.cross(v);
-
-    for (i = 0; i < nTailPoints; i++)
-    {
-        float brightness = 1.0f - (float) i / (float) (nTailPoints - 1);
-        Vector3f v0, v1;
-        float sectionLength;
-        float w0, w1;
-        // Special case the first vertex in the comet tail
-        if (i == 0)
-        {
-            v0 = cometPoints[1] - cometPoints[0];
-            sectionLength = v0.norm();
-            v0.normalize();
-            v1 = v0;
-            w0 = 1.0f;
-            w1 = 0.0f;
-        }
-        else
-        {
-            v0 = cometPoints[i] - cometPoints[i - 1];
-            sectionLength = v0.norm();
-            v0.normalize();
-
-            if (i == nTailPoints - 1)
-            {
-                v1 = v0;
-            }
-            else
-            {
-                v1 = (cometPoints[i + 1] - cometPoints[i]).normalized();
-                q.setFromTwoVectors(v0, v1);
-                Matrix3f m = q.toRotationMatrix();
-                u = m * u;
-                v = m * v;
-                w = m * w;
-            }
-            float dr = (dustTailRadius / (float) nTailPoints) / sectionLength;
-            w0 = atan(dr);
-            float d = sqrt(1.0f + w0 * w0);
-            w1 = 1.0f / d;
-            w0 = w0 / d;
-        }
-
-        float radius = (float) i / (float) nTailPoints * dustTailRadius;
-        for (int j = 0; j < nTailSlices; j++)
-        {
-            float theta = (float) (2 * PI * (float) j / nTailSlices);
-            float s, c;
-            sincos(theta, s, c);
-            CometTailVertex& vtx = cometTailVertices[i * nTailSlices + j];
-            vtx.normal = u * (s * w1) + w * (c * w1) + v * w0;
-            vtx.normal.normalize();
-            s *= radius;
-            c *= radius;
-
-            vtx.point = cometPoints[i] + u * s + w * c;
-            vtx.brightness = brightness;
-        }
-    }
-
-    disableDepthTest();
-    disableDepthMask();
-    glDisable(GL_CULL_FACE);
-    enableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-
-    prog->use();
-    prog->setMVPMatrices(*m.projection, (*m.modelview) * vecgl::translate(pos));
-
-    glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glEnableVertexAttribArray(CelestiaGLProgram::NormalAttributeIndex);
-    auto brightness = prog->attribIndex("brightness");
-    if (brightness != -1)
-        glEnableVertexAttribArray(brightness);
-    prog->vec3Param("color") = body.getCometTailColor().toVector3();
-    prog->vec3Param("viewDir") = pos.normalized();
-    // If fadeDistFromSun = x/x0 >= 1.0, comet tail starts fading,
-    // i.e. fadeFactor quickly transits from 1 to 0.
-    float fadeFactor = 0.5f * (1.0f - tanh(fadeDistance - 1.0f / fadeDistance));
-    prog->floatParam("fadeFactor") = fadeFactor;
-
-    vector<unsigned short> indices;
-    indices.reserve(nTailSlices * 2 + 2);
-    for (int j = 0; j < nTailSlices; j++)
-    {
-        indices.push_back(j);
-        indices.push_back(j + nTailSlices);
-    }
-    indices.push_back(0);
-    indices.push_back(nTailSlices);
-
-    const size_t stride = sizeof(CometTailVertex);
-    for (i = 0; i < nTailPoints - 1; i++)
-    {
-        const auto p = &cometTailVertices[i * nTailSlices];
-        glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                              3, GL_FLOAT, GL_FALSE, stride, &p->point);
-        glVertexAttribPointer(CelestiaGLProgram::NormalAttributeIndex,
-                              3, GL_FLOAT, GL_FALSE, stride, &p->normal);
-        if (brightness != -1)
-            glVertexAttribPointer(brightness, 1, GL_FLOAT, GL_FALSE, stride, &p->brightness);
-        glDrawElements(GL_TRIANGLE_STRIP, indices.size(), GL_UNSIGNED_SHORT, indices.data());
-    }
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::NormalAttributeIndex);
-    if (brightness != -1)
-        glDisableVertexAttribArray(brightness);
-    glEnable(GL_CULL_FACE);
-
-#ifdef DEBUG_COMET_TAIL
-    glColor4f(0.0f, 1.0f, 1.0f, 0.5f);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glVertexPointer(3, GL_FLOAT, 0, cometPoints);
-    glDrawArrays(GL_LINE_STRIP, 0, nTailPoints);
-    glDisableClientState(GL_VERTEX_ARRAY);
-    enableBlending();
-#endif
-    enableDepthTest();
-    enableDepthMask();
+    m_cometRenderer->render(body, observer, pos, dustTailLength, discSizeInPixels, m);
 }
 
 
@@ -3901,11 +3096,6 @@ void Renderer::renderReferenceMark(const ReferenceMark& refMark,
         return;
 
     refMark.render(this, pos, discSizeInPixels, now, m);
-
-    disableDepthTest();
-    disableDepthMask();
-    enableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
 }
 
 
@@ -3916,26 +3106,27 @@ void Renderer::renderAsterisms(const Universe& universe, float dist, const Matri
     if ((renderFlags & ShowDiagrams) == 0 || asterisms == nullptr)
         return;
 
-    if (m_asterismRenderer == nullptr)
+    if (m_asterismRenderer == nullptr || !m_asterismRenderer->sameAsterisms(asterisms))
     {
-        m_asterismRenderer = new AsterismRenderer(asterisms);
-    }
-    else if (!m_asterismRenderer->sameAsterisms(asterisms))
-    {
-        delete m_asterismRenderer;
-        m_asterismRenderer = new AsterismRenderer(asterisms);
+        m_asterismRenderer = std::make_unique<AsterismRenderer>(*this, asterisms);
     }
 
     float opacity = 1.0f;
     if (dist > MaxAsterismLinesConstDist)
     {
-        opacity = clamp((MaxAsterismLinesConstDist - dist) /
-                        (MaxAsterismLinesDist - MaxAsterismLinesConstDist) + 1);
+        opacity = std::clamp((MaxAsterismLinesConstDist - dist)
+                             / (MaxAsterismLinesDist - MaxAsterismLinesConstDist) + 1.0f,
+                             0.0f,
+                             1.0f);
     }
 
-    enableSmoothLines();
-    m_asterismRenderer->render(*this, Color(ConstellationColor, opacity), mvp);
-    disableSmoothLines();
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.smoothLines = true;
+    setPipelineState(ps);
+
+    m_asterismRenderer->render(Color(ConstellationColor, opacity), mvp);
 }
 
 
@@ -3945,14 +3136,9 @@ void Renderer::renderBoundaries(const Universe& universe, float dist, const Matr
     if ((renderFlags & ShowBoundaries) == 0 || boundaries == nullptr)
         return;
 
-    if (m_boundariesRenderer == nullptr)
+    if (m_boundariesRenderer == nullptr || !m_boundariesRenderer->sameBoundaries(boundaries))
     {
-        m_boundariesRenderer = new BoundariesRenderer(boundaries);
-    }
-    else if (!m_boundariesRenderer->sameBoundaries(boundaries))
-    {
-        delete m_boundariesRenderer;
-        m_boundariesRenderer = new BoundariesRenderer(boundaries);
+        m_boundariesRenderer = std::make_unique<BoundariesRenderer>(*this, boundaries);
     }
 
     /* We'll linearly fade the boundaries as a function of the
@@ -3960,13 +3146,19 @@ void Renderer::renderBoundaries(const Universe& universe, float dist, const Matr
     float opacity = 1.0f;
     if (dist > MaxAsterismLabelsConstDist)
     {
-        opacity = clamp((MaxAsterismLabelsConstDist - dist) /
-                        (MaxAsterismLabelsDist - MaxAsterismLabelsConstDist) + 1);
+        opacity = std::clamp((MaxAsterismLabelsConstDist - dist)
+                             / (MaxAsterismLabelsDist - MaxAsterismLabelsConstDist) + 1.0f,
+                             0.0f,
+                             1.0f);
     }
 
-    enableSmoothLines();
-    m_boundariesRenderer->render(*this, Color(BoundaryColor, opacity), mvp);
-    disableSmoothLines();
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.smoothLines = true;
+    setPipelineState(ps);
+
+    m_boundariesRenderer->render(Color(BoundaryColor, opacity), mvp);
 }
 
 
@@ -3982,35 +3174,49 @@ static float luminosityAtOpposition(float sunLuminosity,
     double power = astro::SOLAR_POWER * sunLuminosity;
 
     // Compute the irradiance at the body's distance from the star
-    double irradiance = power / sphereArea(distanceFromSun * 1000);
+    double irradiance = power / math::sphereArea(distanceFromSun * 1000);
 
     // Compute the total energy hitting the planet; assume an albedo of 1.0, so
     // reflected energy = incident energy.
-    double incidentEnergy = irradiance * circleArea(objRadius * 1000);
+    double incidentEnergy = irradiance * math::circleArea(objRadius * 1000);
 
     // Compute the luminosity (i.e. power relative to solar power)
     return (float) (incidentEnergy / astro::SOLAR_POWER);
 }
 
 
-static bool isBodyVisible(const Body* body, int bodyVisibilityMask)
+static bool isBodyVisible(const Body* body, BodyClassification bodyVisibilityMask)
 {
-    int klass = body->getClassification();
-    switch (klass)
+    BodyClassification bodyClassification = body->getClassification();
+    switch (bodyClassification)
     {
     // Diffuse objects don't have controls to show/hide visibility
-    case Body::Diffuse:
+    case BodyClassification::Diffuse:
         return body->isVisible();
 
-    // SurfaceFeature inherits visibility of its parent body
-    case Body::SurfaceFeature:
-        assert(body->getSystem() != nullptr);
-        body = body->getSystem()->getPrimaryBody();
-        assert(body != nullptr);
-        return body->isVisible() && (bodyVisibilityMask & body->getClassification()) != 0;
+    // SurfaceFeature and Component inherit visibility of its parent body
+    case BodyClassification::Component:
+    case BodyClassification::SurfaceFeature:
+        for (const PlanetarySystem* system = body->getSystem(); system != nullptr;)
+        {
+            auto primaryBody = system->getPrimaryBody();
+            if (primaryBody == nullptr)
+            {
+                // TODO figure out what to do about components/features of stars/barycenters
+                return false;
+            }
+
+            if (auto primaryClassification = primaryBody->getClassification();
+                !util::is_set(primaryClassification, BodyClassification::SurfaceFeature | BodyClassification::Component))
+            {
+                return primaryBody->isVisible() && util::is_set(primaryClassification, bodyVisibilityMask);
+            }
+
+            system = primaryBody->getSystem();
+        }
 
     default:
-        return body->isVisible() && (bodyVisibilityMask & klass) != 0;
+        return body->isVisible() && util::is_set(bodyClassification, bodyVisibilityMask);
     }
 }
 
@@ -4019,6 +3225,7 @@ void Renderer::addRenderListEntries(RenderListEntry& rle,
                                     bool isLabeled)
 {
     bool visibleAsPoint = rle.appMag < faintestPlanetMag && body.isVisibleAsPoint();
+    const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
 
     if (rle.discSizeInPixels > 1 || visibleAsPoint || isLabeled)
     {
@@ -4027,7 +3234,7 @@ void Renderer::addRenderListEntries(RenderListEntry& rle,
 
         if (body.getGeometry() != InvalidResource && rle.discSizeInPixels > 1)
         {
-            Geometry* geometry = GetGeometryManager()->find(body.getGeometry());
+            const Geometry* geometry = engine::GetGeometryManager()->find(body.getGeometry());
             if (geometry == nullptr)
                 rle.isOpaque = true;
             else
@@ -4038,13 +3245,15 @@ void Renderer::addRenderListEntries(RenderListEntry& rle,
             rle.isOpaque = true;
         }
         rle.radius = body.getRadius();
+        if (const RingSystem* rings = bodyFeaturesManager->getRings(&body); rings != nullptr)
+            rle.radius += rings->outerRadius;
         renderList.push_back(rle);
     }
 
-    if (body.getClassification() == Body::Comet && (renderFlags & ShowCometTails) != 0)
+    if (body.getClassification() == BodyClassification::Comet && (renderFlags & ShowCometTails) != 0)
     {
         float radius = cometDustTailLength(rle.sun.norm(), body.getRadius());
-        float discSize = (radius / (float) rle.distance) / pixelSize;
+        float discSize = (radius / rle.distance) / pixelSize;
         if (discSize > 1)
         {
             rle.renderableType = RenderListEntry::RenderableCometTail;
@@ -4056,40 +3265,37 @@ void Renderer::addRenderListEntries(RenderListEntry& rle,
         }
     }
 
-    const list<ReferenceMark*>* refMarks = body.getReferenceMarks();
-    if (refMarks != nullptr)
-    {
-        for (const auto rm : *refMarks)
-        {
-            rle.renderableType = RenderListEntry::RenderableReferenceMark;
-            rle.refMark = rm;
-            rle.isOpaque = rm->isOpaque();
-            rle.radius = rm->boundingSphereRadius();
-            renderList.push_back(rle);
-        }
-    }
+    bodyFeaturesManager->processReferenceMarks(&body,
+                                               [this, &rle](const ReferenceMark* rm)
+                                               {
+                                                   rle.renderableType = RenderListEntry::RenderableReferenceMark;
+                                                   rle.refMark = rm;
+                                                   rle.isOpaque = rm->isOpaque();
+                                                   rle.radius = rm->boundingSphereRadius();
+                                                   renderList.push_back(rle);
+                                               });
 }
 
 
 void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
-                                const Frustum& viewFrustum,
+                                const math::InfiniteFrustum& viewFrustum,
                                 const Vector3d& viewPlaneNormal,
                                 const Vector3d& frameCenter,
                                 const FrameTree* tree,
                                 const Observer& observer,
                                 double now)
 {
-    int labelClassMask = translateLabelModeToClassMask(labelMode);
+    BodyClassification labelClassMask = translateLabelModeToClassMask(labelMode);
 
-    Matrix3f viewMat = observer.getOrientationf().toRotationMatrix();
+    Matrix3f viewMat = getCameraOrientationf().toRotationMatrix();
     Vector3f viewMatZ = viewMat.row(2);
     double invCosViewAngle = 1.0 / cosViewConeAngle;
-    double sinViewAngle = sqrt(1.0 - square(cosViewConeAngle));
+    double sinViewAngle = sqrt(1.0 - math::square(cosViewConeAngle));
 
     unsigned int nChildren = tree != nullptr ? tree->childCount() : 0;
     for (unsigned int i = 0; i < nChildren; i++)
     {
-        auto phase = tree->getChild(i);
+        const TimelinePhase* phase = tree->getChild(i);
 
         // No need to do anything if the phase isn't active now
         if (!phase->includes(now))
@@ -4102,8 +3308,7 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
 
         // Get the position of the body relative to the sun.
         Vector3d p = phase->orbit()->positionAtTime(now);
-        auto frame = phase->orbitFrame();
-        Vector3d pos_s = frameCenter + frame->getOrientation(now).conjugate() * p;
+        Vector3d pos_s = frameCenter + phase->orbitFrame()->getOrientation(now).conjugate() * p;
 
         // We now have the positions of the observer and the planet relative
         // to the sun.  From these, compute the position of the body
@@ -4181,14 +3386,14 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
             // light from all nearby stars, we just consider the one with the
             // highest apparent brightness.
             float appMag = 100.0f;
-            for (unsigned int li = 0; li < lightSourceList.size(); li++)
+            for (const auto &lightSource : lightSourceList)
             {
-                Vector3d sunPos = pos_v - lightSourceList[li].position;
-                appMag = min(appMag, body->getApparentMagnitude(lightSourceList[li].luminosity, sunPos, pos_v));
+                Eigen::Vector3d sunPos = pos_v - lightSource.position;
+                appMag = std::min(appMag, body->getApparentMagnitude(lightSource.luminosity, sunPos, pos_v));
             }
 
             bool visibleAsPoint = appMag < faintestPlanetMag && body->isVisibleAsPoint();
-            bool isLabeled = (body->getOrbitClassification() & labelClassMask) != 0;
+            bool isLabeled = util::is_set(body->getOrbitClassification(), labelClassMask);
 
             if ((discSize > 1 || visibleAsPoint || isLabeled) && isBodyVisible(body, bodyVisibilityMask))
             {
@@ -4225,8 +3430,8 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
             // true or when a subtree object could potentially illuminate something
             // in the view cone.
             auto minPossibleDistance = (float) (dist_v - subtree->boundingSphereRadius());
-            float brightestPossible = 0.0;
-            float largestPossible = 0.0;
+            float brightestPossible = 0.0f;
+            float largestPossible = 0.0f;
 
             // If the viewer is not within the subtree bounding sphere, see if we can cull it because
             // it contains no objects brighter than the limiting magnitude and no objects that will
@@ -4237,13 +3442,13 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
 
                 // Compute the luminosity from reflected light of the largest object in the subtree
                 float lum = 0.0f;
-                for (unsigned int li = 0; li < lightSourceList.size(); li++)
+                for (const auto &lightSource : lightSourceList)
                 {
-                    Vector3d sunPos = pos_v - lightSourceList[li].position;
-                    lum += luminosityAtOpposition(lightSourceList[li].luminosity, (float) sunPos.norm(), (float) subtree->maxChildRadius());
+                    Eigen::Vector3d sunPos = pos_v - lightSource.position;
+                    lum += luminosityAtOpposition(lightSource.luminosity, (float) sunPos.norm(), (float) subtree->maxChildRadius());
                 }
                 brightestPossible = astro::lumToAppMag(lum, astro::kilometersToLightYears(minPossibleDistance));
-                largestPossible = (float) subtree->maxChildRadius() / (float) minPossibleDistance / pixelSize;
+                largestPossible = (float) subtree->maxChildRadius() / minPossibleDistance / pixelSize;
             }
             else
             {
@@ -4257,7 +3462,7 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
             if (brightestPossible < faintestPlanetMag || largestPossible > 1.0f)
             {
                 // See if the object or any of its children are within the view frustum
-                if (viewFrustum.testSphere(pos_v.cast<float>(), (float) subtree->boundingSphereRadius()) != Frustum::Outside)
+                if (viewFrustum.testSphere(pos_v.cast<float>(), (float) subtree->boundingSphereRadius()) != math::FrustumAspect::Outside)
                 {
                     traverseSubtree = true;
                 }
@@ -4299,7 +3504,7 @@ void Renderer::buildRenderLists(const Vector3d& astrocentricObserverPos,
 
 void Renderer::buildOrbitLists(const Vector3d& astrocentricObserverPos,
                                const Quaterniond& observerOrientation,
-                               const Frustum& viewFrustum,
+                               const math::InfiniteFrustum& viewFrustum,
                                const FrameTree* tree,
                                double now)
 {
@@ -4309,7 +3514,7 @@ void Renderer::buildOrbitLists(const Vector3d& astrocentricObserverPos,
     unsigned int nChildren = tree != nullptr ? tree->childCount() : 0;
     for (unsigned int i = 0; i < nChildren; i++)
     {
-        auto phase = tree->getChild(i);
+        const TimelinePhase* phase = tree->getChild(i);
 
         // No need to do anything if the phase isn't active now
         if (!phase->includes(now))
@@ -4334,7 +3539,7 @@ void Renderer::buildOrbitLists(const Vector3d& astrocentricObserverPos,
         if (body->isVisible() &&
             (body == highlightObject.body() ||
              orbitVis == Body::AlwaysVisible ||
-             (orbitVis == Body::UseClassVisibility && (body->getOrbitClassification() & orbitMask) != 0)))
+             (orbitVis == Body::UseClassVisibility && util::is_set(body->getOrbitClassification(), orbitMask))))
         {
             Vector3d orbitOrigin = Vector3d::Zero();
             Selection centerObject = phase->orbitFrame()->getCenter();
@@ -4390,7 +3595,7 @@ void Renderer::buildOrbitLists(const Vector3d& astrocentricObserverPos,
             if (traverseSubtree)
             {
                 // See if the object or any of its children are within the view frustum
-                if (viewFrustum.testSphere(pos_v.cast<float>(), (float) subtree->boundingSphereRadius()) != Frustum::Outside)
+                if (viewFrustum.testSphere(pos_v.cast<float>(), (float) subtree->boundingSphereRadius()) != math::FrustumAspect::Outside)
                 {
                     buildOrbitLists(astrocentricObserverPos,
                                     observerOrientation,
@@ -4404,45 +3609,45 @@ void Renderer::buildOrbitLists(const Vector3d& astrocentricObserverPos,
 }
 
 
-static Color getBodyLabelColor(int classification)
+static Color getBodyLabelColor(BodyClassification classification)
 {
     switch (classification)
     {
-    case Body::Planet:
+    case BodyClassification::Planet:
         return Renderer::PlanetLabelColor;
-    case Body::DwarfPlanet:
+    case BodyClassification::DwarfPlanet:
         return Renderer::DwarfPlanetLabelColor;
-    case Body::Moon:
+    case BodyClassification::Moon:
         return Renderer::MoonLabelColor;
-    case Body::MinorMoon:
+    case BodyClassification::MinorMoon:
         return Renderer::MinorMoonLabelColor;
-    case Body::Asteroid:
+    case BodyClassification::Asteroid:
         return Renderer::AsteroidLabelColor;
-    case Body::Comet:
+    case BodyClassification::Comet:
         return Renderer::CometLabelColor;
-    case Body::Spacecraft:
+    case BodyClassification::Spacecraft:
         return Renderer::SpacecraftLabelColor;
     default:
         return Color::Black;
     }
 }
 
-void Renderer::buildLabelLists(const Frustum& viewFrustum,
+void Renderer::buildLabelLists(const math::InfiniteFrustum& viewFrustum,
                                double now)
 {
-    int labelClassMask = translateLabelModeToClassMask(labelMode);
-    Body* lastPrimary = nullptr;
-    Sphered primarySphere;
+    BodyClassification labelClassMask = translateLabelModeToClassMask(labelMode);
+    const Body* lastPrimary = nullptr;
+    math::Sphered primarySphere;
 
-    for (auto &ri : renderList)
+    for (const auto &ri : renderList)
     {
         if (ri.renderableType != RenderListEntry::RenderableBody)
             continue;
 
-        if ((ri.body->getOrbitClassification() & labelClassMask) == 0)
+        if (!util::is_set(ri.body->getOrbitClassification(), labelClassMask))
             continue;
 
-        if (viewFrustum.testSphere(ri.position, ri.radius) == Frustum::Outside)
+        if (viewFrustum.testSphere(ri.position, ri.radius) == math::FrustumAspect::Outside)
             continue;
 
         const Body* body = ri.body;
@@ -4453,11 +3658,11 @@ void Renderer::buildLabelLists(const Frustum& viewFrustum,
         if (body->getName().empty())
             continue;
 
-        auto phase = body->getTimeline()->findPhase(now);
-        Body* primary = phase->orbitFrame()->getCenter().body();
-        if (primary != nullptr && (primary->getClassification() & Body::Invisible) != 0)
+        const TimelinePhase* phase = body->getTimeline()->findPhase(now).get();
+        const Body* primary = phase->orbitFrame()->getCenter().body();
+        if (primary != nullptr && util::is_set(primary->getClassification(), BodyClassification::Invisible))
         {
-            Body* parent = phase->orbitFrame()->getCenter().body();
+            const Body* parent = phase->orbitFrame()->getCenter().body();
             if (parent != nullptr)
                 primary = parent;
         }
@@ -4493,11 +3698,11 @@ void Renderer::buildLabelLists(const Frustum& viewFrustum,
                              phase->orbit()->positionAtTime(now);
                 Vector3d v = ri.position.cast<double>() - p;
 
-                primarySphere = Sphered(v, primary->getRadius());
+                primarySphere = math::Sphered(v, primary->getRadius());
                 lastPrimary = primary;
             }
 
-            Ray3d testRay(Vector3d::Zero(), pos.cast<double>());
+            Eigen::ParametrizedLine<double, 3> testRay(Vector3d::Zero(), pos.cast<double>());
 
             // Test the viewer-to-labeled object ray against
             // the primary sphere (TODO: handle ellipsoids)
@@ -4549,12 +3754,12 @@ void Renderer::addStarOrbitToRenderList(const Star& star,
     // If the star isn't fixed, add its orbit to the render list
     if ((renderFlags & ShowOrbits) == 0)
         return;
-    if ((orbitMask & Body::Stellar) == 0 && highlightObject.star() != &star)
+    if (!util::is_set(orbitMask, BodyClassification::Stellar) && highlightObject.star() != &star)
         return;
     if (star.getOrbit() == nullptr)
         return;
 
-    Matrix3d viewMat = observer.getOrientation().toRotationMatrix();
+    Matrix3d viewMat = getCameraOrientation().toRotationMatrix();
     Vector3d viewMatZ = viewMat.row(2);
 
     // Get orbit origin relative to the observer
@@ -4584,10 +3789,10 @@ void Renderer::addStarOrbitToRenderList(const Star& star,
 // a frustum with the specified aspect ratio (width/height) and vertical field of
 // view. We follow the convention used elsewhere and use units of degrees for
 // the field of view angle.
-static double calcMaxFOV(double fovY_degrees, double aspectRatio)
+static float calcMaxFOV(float fovY_degrees, float aspectRatio)
 {
-    double l = 1.0 / tan(degToRad(fovY_degrees / 2.0));
-    return radToDeg(atan(sqrt(aspectRatio * aspectRatio + 1.0) / l)) * 2.0;
+    float l = 1.0f / std::tan(math::degToRad(fovY_degrees * 0.5f));
+    return math::radToDeg(std::atan(std::sqrt(aspectRatio * aspectRatio + 1.0f) / l)) * 2.0f;
 }
 
 
@@ -4605,60 +3810,28 @@ void Renderer::renderPointStars(const StarDatabase& starDB,
     Vector3d obsPos = observer.getPosition().toLy();
 
     PointStarRenderer starRenderer;
-#ifdef USE_GLCONTEXT
-    starRenderer.context           = context;
-#endif
+
     starRenderer.renderer          = this;
     starRenderer.starDB            = &starDB;
     starRenderer.observer          = &observer;
     starRenderer.obsPos            = obsPos;
-    starRenderer.viewNormal        = observer.getOrientationf().conjugate() * -Vector3f::UnitZ();
+    starRenderer.viewNormal        = getCameraOrientationf().conjugate() * -Vector3f::UnitZ();
     starRenderer.renderList        = &renderList;
     starRenderer.starVertexBuffer  = pointStarVertexBuffer;
     starRenderer.glareVertexBuffer = glareVertexBuffer;
-    starRenderer.fov               = fov;
-    starRenderer.cosFOV            = (float) cos(degToRad(calcMaxFOV(fov, getAspectRatio())) / 2.0f);
+    starRenderer.cosFOV            = std::cos(math::degToRad(calcMaxFOV(fov, getAspectRatio())) / 2.0f);
 
     starRenderer.pixelSize         = pixelSize;
-    starRenderer.brightnessScale   = brightnessScale * corrFac;
-    starRenderer.brightnessBias    = brightnessBias;
     starRenderer.faintestMag       = faintestMag;
-    starRenderer.faintestMagNight  = faintestMagNight;
-    starRenderer.saturationMag     = saturationMag;
-#ifdef USE_HDR
-    starRenderer.exposure          = exposure + brightPlus;
-#endif
     starRenderer.distanceLimit     = distanceLimit;
     starRenderer.labelMode         = labelMode;
     starRenderer.SolarSystemMaxDistance = SolarSystemMaxDistance;
-#ifdef DEBUG_HDR_ADAPT
-    starRenderer.minMag = -100.f;
-    starRenderer.maxMag =  100.f;
-    starRenderer.minAlpha = 1.f;
-    starRenderer.maxAlpha = 0.f;
-    starRenderer.maxSize  = 0.f;
-    starRenderer.above    = 1.0f;
-    starRenderer.countAboveN = 0L;
-    starRenderer.total       = 0L;
-#endif
 
     // = 1.0 at startup
     float effDistanceToScreen = mmToInches((float) REF_DISTANCE_TO_SCREEN) * pixelSize * getScreenDpi();
-    starRenderer.labelThresholdMag = 1.2f * max(1.0f, (faintestMag - 4.0f) * (1.0f - 0.5f * (float) log10(effDistanceToScreen)));
+    starRenderer.labelThresholdMag = 1.2f * max(1.0f, (faintestMag - 4.0f) * (1.0f - 0.5f * std::log10(effDistanceToScreen)));
 
-    starRenderer.size = BaseStarDiscSize * screenDpi / 96;
-    if (starStyle == ScaledDiscStars)
-    {
-        starRenderer.useScaledDiscs = true;
-        starRenderer.brightnessScale *= 2.0f;
-        starRenderer.maxDiscSize = starRenderer.size * MaxScaledDiscStarSize;
-    }
-    else if (starStyle == FuzzyPointStars)
-    {
-        starRenderer.brightnessScale *= 1.0f;
-    }
-
-    starRenderer.colorTemp = colorTemp;
+    starRenderer.colorTemp = &starColors;
 
     gaussianDiscTex->bind();
     starRenderer.starVertexBuffer->setTexture(gaussianDiscTex);
@@ -4673,25 +3846,18 @@ void Renderer::renderPointStars(const StarDatabase& starDB,
     else
         starRenderer.starVertexBuffer->startSprites();
 
-#ifdef OCTREE_DEBUG
-    m_starProcStats.nodes = 0;
-    m_starProcStats.height = 0;
-    m_starProcStats.objects = 0;
-#endif
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE};
+    setPipelineState(ps);
+
     starDB.findVisibleStars(starRenderer,
                             obsPos.cast<float>(),
-                            observer.getOrientationf(),
-                            degToRad(fov),
+                            getCameraOrientationf(),
+                            math::degToRad(fov),
                             getAspectRatio(),
-                            faintestMagNight,
-#ifdef OCTREE_DEBUG
-                            &m_starProcStats);
-#else
-                            nullptr);
-#endif
+                            faintestMagNight);
 
-    starRenderer.starVertexBuffer->render();
-    starRenderer.glareVertexBuffer->render();
     starRenderer.starVertexBuffer->finish();
     starRenderer.glareVertexBuffer->finish();
     PointStarVertexBuffer::disable();
@@ -4708,45 +3874,42 @@ void Renderer::renderDeepSkyObjects(const Universe& universe,
 {
     DSORenderer dsoRenderer;
 
+    auto cameraOrientation = getCameraOrientationf();
+
+    m_galaxyRenderer->update(cameraOrientation, pixelSize, fov, observer.getZoom());
+    dsoRenderer.galaxyRenderer = m_galaxyRenderer.get();
+
+    m_globularRenderer->update(cameraOrientation, pixelSize, fov, observer.getZoom());
+    dsoRenderer.globularRenderer = m_globularRenderer.get();
+
+    m_nebulaRenderer->update(cameraOrientation, pixelSize, fov, observer.getZoom());
+    dsoRenderer.nebulaRenderer = m_nebulaRenderer.get();
+
+    m_openClusterRenderer->update(cameraOrientation, pixelSize, fov, observer.getZoom());
+    dsoRenderer.openClusterRenderer = m_openClusterRenderer.get();
+
     Vector3d obsPos     = observer.getPosition().toLy();
 
     DSODatabase* dsoDB  = universe.getDSOCatalog();
 
-#ifdef USE_GLCONTEXT
-    dsoRenderer.context          = context;
-#endif
     dsoRenderer.renderer         = this;
     dsoRenderer.dsoDB            = dsoDB;
-    dsoRenderer.orientationMatrix= observer.getOrientationf().conjugate().toRotationMatrix();
+    dsoRenderer.orientationMatrixT = cameraOrientation.toRotationMatrix();
     dsoRenderer.observer         = &observer;
     dsoRenderer.obsPos           = obsPos;
-    dsoRenderer.viewNormal       = observer.getOrientationf().conjugate() * -Vector3f::UnitZ();
-    dsoRenderer.fov              = fov;
     // size/pixelSize =0.86 at 120deg, 1.43 at 45deg and 1.6 at 0deg.
-    dsoRenderer.size             = pixelSize * 1.6f / corrFac;
     dsoRenderer.pixelSize        = pixelSize;
-    dsoRenderer.brightnessScale  = brightnessScale * corrFac;
-    dsoRenderer.brightnessBias   = brightnessBias;
     dsoRenderer.avgAbsMag        = dsoDB->getAverageAbsoluteMagnitude();
     dsoRenderer.faintestMag      = faintestMag;
-    dsoRenderer.faintestMagNight = faintestMagNight;
-    dsoRenderer.saturationMag    = saturationMag;
-#ifdef USE_HDR
-    dsoRenderer.exposure         = exposure + brightPlus;
-#endif
     dsoRenderer.renderFlags      = renderFlags;
     dsoRenderer.labelMode        = labelMode;
-    dsoRenderer.wWidth           = windowWidth;
-    dsoRenderer.wHeight          = windowHeight;
 
-    dsoRenderer.frustum = Frustum(degToRad(fov),
-                                  getAspectRatio(),
-                                  MinNearPlaneDistance);
+    dsoRenderer.frustum = projectionMode->getInfiniteFrustum(MinNearPlaneDistance, observer.getZoom());
     // Use pixelSize * screenDpi instead of FoV, to eliminate windowHeight dependence.
     // = 1.0 at startup
     float effDistanceToScreen = mmToInches((float) REF_DISTANCE_TO_SCREEN) * pixelSize * getScreenDpi();
 
-    dsoRenderer.labelThresholdMag = 2.0f * max(1.0f, (faintestMag - 4.0f) * (1.0f - 0.5f * (float) log10(effDistanceToScreen)));
+    dsoRenderer.labelThresholdMag = 2.0f * max(1.0f, (faintestMag - 4.0f) * (1.0f - 0.5f * log10(effDistanceToScreen)));
 
     using namespace celestia;
     galaxyRep      = MarkerRepresentation(MarkerRepresentation::Triangle, 8.0f, GalaxyLabelColor);
@@ -4754,32 +3917,19 @@ void Renderer::renderDeepSkyObjects(const Universe& universe,
     openClusterRep = MarkerRepresentation(MarkerRepresentation::Circle,   8.0f, OpenClusterLabelColor);
     globularRep    = MarkerRepresentation(MarkerRepresentation::Circle,   8.0f, GlobularLabelColor);
 
-    // Render any line primitives with smooth lines
-    // (mostly to make graticules look good.)
-    enableSmoothLines();
-
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
-
-#ifdef OCTREE_DEBUG
-    m_dsoProcStats.objects = 0;
-    m_dsoProcStats.nodes = 0;
-    m_dsoProcStats.height = 0;
-#endif
     dsoDB->findVisibleDSOs(dsoRenderer,
                            obsPos,
-                           observer.getOrientationf(),
-                           degToRad(fov),
+                           cameraOrientation,
+                           math::degToRad(fov),
                            getAspectRatio(),
-                           2 * faintestMagNight,
-#ifdef OCTREE_DEBUG
-                           &m_dsoProcStats);
-#else
-                            nullptr);
-#endif
+                           2 * faintestMagNight);
+
+    m_galaxyRenderer->render();
+    m_globularRenderer->render();
+    m_nebulaRenderer->render();
+    m_openClusterRenderer->render();
 
     // clog << "DSOs processed: " << dsoRenderer.dsosProcessed << endl;
-
-    disableSmoothLines();
 }
 
 
@@ -4791,48 +3941,49 @@ static Vector3d toStandardCoords(const Vector3d& v)
 
 void Renderer::renderSkyGrids(const Observer& observer)
 {
+    using engine::SkyGrid;
     if ((renderFlags & ShowCelestialSphere) != 0)
     {
         SkyGrid grid;
-        grid.setOrientation(Quaterniond(AngleAxis<double>(astro::J2000Obliquity, Vector3d::UnitX())));
-        grid.setLineColor(EquatorialGridColor);
-        grid.setLabelColor(EquatorialGridLabelColor);
-        grid.render(*this, observer, windowWidth, windowHeight);
+        grid.orientation = Quaterniond(AngleAxis<double>(astro::J2000Obliquity, Vector3d::UnitX()));
+        grid.lineColor = EquatorialGridColor;
+        grid.labelColor = EquatorialGridLabelColor;
+        m_skyGridRenderer->render(grid, observer.getZoom());
     }
 
     if ((renderFlags & ShowGalacticGrid) != 0)
     {
         SkyGrid galacticGrid;
-        galacticGrid.setOrientation((astro::eclipticToEquatorial() * astro::equatorialToGalactic()).conjugate());
-        galacticGrid.setLineColor(GalacticGridColor);
-        galacticGrid.setLabelColor(GalacticGridLabelColor);
-        galacticGrid.setLongitudeUnits(SkyGrid::LongitudeDegrees);
-        galacticGrid.render(*this, observer, windowWidth, windowHeight);
+        galacticGrid.orientation = (astro::eclipticToEquatorial() * astro::equatorialToGalactic()).conjugate();
+        galacticGrid.lineColor = GalacticGridColor;
+        galacticGrid.labelColor = GalacticGridLabelColor;
+        galacticGrid.longitudeUnits = SkyGrid::LongitudeDegrees;
+        m_skyGridRenderer->render(galacticGrid, observer.getZoom());
     }
 
     if ((renderFlags & ShowEclipticGrid) != 0)
     {
         SkyGrid grid;
-        grid.setOrientation(Quaterniond::Identity());
-        grid.setLineColor(EclipticGridColor);
-        grid.setLabelColor(EclipticGridLabelColor);
-        grid.setLongitudeUnits(SkyGrid::LongitudeDegrees);
-        grid.render(*this, observer, windowWidth, windowHeight);
+        grid.orientation = Quaterniond::Identity();
+        grid.lineColor = EclipticGridColor;
+        grid.labelColor = EclipticGridLabelColor;
+        grid.longitudeUnits = SkyGrid::LongitudeDegrees;
+        m_skyGridRenderer->render(grid, observer.getZoom());
     }
 
     if ((renderFlags & ShowHorizonGrid) != 0)
     {
         double tdb = observer.getTime();
         auto frame = observer.getFrame();
-        Body* body = frame->getRefObject().body();
+        const Body* body = frame->getRefObject().body();
 
         if (body != nullptr)
         {
             SkyGrid grid;
-            grid.setLineColor(HorizonGridColor);
-            grid.setLabelColor(HorizonGridLabelColor);
-            grid.setLongitudeUnits(SkyGrid::LongitudeDegrees);
-            grid.setLongitudeDirection(SkyGrid::IncreasingClockwise);
+            grid.lineColor = HorizonGridColor;
+            grid.labelColor = HorizonGridLabelColor;
+            grid.longitudeUnits = SkyGrid::LongitudeDegrees;
+            grid.longitudeDirection = SkyGrid::IncreasingClockwise;
 
             Vector3d zenithDirection = observer.getPosition().offsetFromKm(body->getPosition(tdb)).normalized();
 
@@ -4854,14 +4005,15 @@ void Renderer::renderSkyGrids(const Observer& observer)
                 m.row(0) = u;
                 m.row(1) = v;
                 m.row(2) = zenithDirection;
-                grid.setOrientation(Quaterniond(m));
+                grid.orientation = Quaterniond(m);
 
-                grid.render(*this, observer, windowWidth, windowHeight);
+                m_skyGridRenderer->render(grid, observer.getZoom());
             }
         }
     }
 
-    renderEclipticLine();
+    if ((renderFlags & ShowEcliptic) != 0)
+        m_eclipticLineRenderer->render();
 }
 
 void Renderer::labelConstellations(const AsterismList& asterisms,
@@ -4869,92 +4021,51 @@ void Renderer::labelConstellations(const AsterismList& asterisms,
 {
     Vector3f observerPos = observer.getPosition().toLy().cast<float>();
 
-    for (auto ast : asterisms)
+    for (const auto& ast : asterisms)
     {
-        if (ast->getChainCount() > 0 && ast->getActive())
+        if (!ast.getActive())
+            continue;
+
+        // The constellation label is positioned at the average
+        // position of all stars in the first chain.  This usually
+        // gives reasonable results.
+
+        // Draw all constellation labels at the same distance.
+        // Asterism.averagePosition() is normalized
+        Eigen::Vector3f rpos = ast.averagePosition() * 1.0e4f - observerPos;
+
+        if ((getCameraOrientationf() * rpos).z() < 0)
         {
-            const Asterism::Chain& chain = ast->getChain(0);
-
-            if (!chain.empty())
+            // We'll linearly fade the labels as a function of the
+            // observer's distance to the origin of coordinates:
+            float opacity = 1.0f;
+            if (float dist = observerPos.norm(); dist > MaxAsterismLabelsConstDist)
             {
-                // The constellation label is positioned at the average
-                // position of all stars in the first chain.  This usually
-                // gives reasonable results.
-                Vector3f avg = Vector3f::Zero();
-                // XXX: std::reduce
-                for (const auto& c : chain)
-                    avg += c;
-
-                avg = avg / (float) chain.size();
-
-                // Draw all constellation labels at the same distance
-                avg.normalize();
-                avg = avg * 1.0e4f;
-
-                Vector3f rpos = avg - observerPos;
-
-                if ((observer.getOrientationf() * rpos).z() < 0)
-                {
-                    // We'll linearly fade the labels as a function of the
-                    // observer's distance to the origin of coordinates:
-                    float opacity = 1.0f;
-                    float dist = observerPos.norm();
-                    if (dist > MaxAsterismLabelsConstDist)
-                    {
-                        opacity = clamp((MaxAsterismLabelsConstDist - dist) /
-                                        (MaxAsterismLabelsDist - MaxAsterismLabelsConstDist) + 1);
-                    }
-
-                    // Use the default label color unless the constellation has an
-                    // override color set.
-                    Color labelColor = ConstellationLabelColor;
-                    if (ast->isColorOverridden())
-                        labelColor = ast->getOverrideColor();
-
-                    addBackgroundAnnotation(nullptr,
-                                            ast->getName((labelMode & I18nConstellationLabels) != 0),
-                                            Color(labelColor, opacity),
-                                            rpos,
-                                            AlignCenter, VerticalAlignCenter);
-                }
+                opacity = std::clamp((MaxAsterismLabelsConstDist - dist)
+                                     / (MaxAsterismLabelsDist - MaxAsterismLabelsConstDist) + 1.0f,
+                                     0.0f,
+                                     1.0f);
             }
+
+            // Use the default label color unless the constellation has an
+            // override color set.
+            Color labelColor = ConstellationLabelColor;
+            if (ast.isColorOverridden())
+                labelColor = ast.getOverrideColor();
+
+            addBackgroundAnnotation(nullptr,
+                                    ast.getName((labelMode & I18nConstellationLabels) != 0),
+                                    Color(labelColor, opacity),
+                                    rpos,
+                                    LabelHorizontalAlignment::Center, LabelVerticalAlignment::Center);
         }
     }
 }
 
 
-void Renderer::renderParticles(const vector<Particle>& particles)
-{
-    ShaderProperties shaderprop;
-    shaderprop.lightModel = ShaderProperties::ParticleModel;
-    shaderprop.texUsage = ShaderProperties::PointSprite;
-    auto *prog = shaderManager->getShader(shaderprop);
-    if (prog == nullptr)
-        return;
-    prog->use();
-
-#ifndef GL_ES
-    glEnable(GL_POINT_SPRITE);
-#endif
-    glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                          3, GL_FLOAT, GL_FALSE, sizeof(Particle), &particles[0].center);
-    glEnableVertexAttribArray(CelestiaGLProgram::PointSizeAttributeIndex);
-    glVertexAttribPointer(CelestiaGLProgram::PointSizeAttributeIndex,
-                          1, GL_FLOAT, GL_FALSE,
-                          sizeof(Particle), &particles[0].size);
-    glDrawArrays(GL_POINTS, 0, particles.size());
-
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::PointSizeAttributeIndex);
-#ifndef GL_ES
-    glDisable(GL_POINT_SPRITE);
-#endif
-}
-
 void
 Renderer::renderAnnotationMarker(const Annotation &a,
-                                 FontStyle fs,
+                                 TextLayout &layout,
                                  float depth,
                                  const Matrices &m)
 {
@@ -4963,7 +4074,7 @@ Renderer::renderAnnotationMarker(const Annotation &a,
 
     glVertexAttrib(CelestiaGLProgram::ColorAttributeIndex, a.color);
 
-    Matrix4f mv = vecgl::translate(*m.modelview, (float)(int)a.position.x(), (float)(int)a.position.y(), depth);
+    Matrix4f mv = math::translate(*m.modelview, (float)(int)a.position.x(), (float)(int)a.position.y(), depth);
     Matrices mm = { m.projection, &mv };
 
     if (markerRep.symbol() == celestia::MarkerRepresentation::Crosshair)
@@ -4973,43 +4084,38 @@ Renderer::renderAnnotationMarker(const Annotation &a,
 
     if (!markerRep.label().empty())
     {
-        auto font = getFont(fs);
-        if (font)
-        {
-            int labelOffset = (int)markerRep.size() / 2;
-            float x = labelOffset + PixelOffset;
-            float y = -labelOffset - font->getHeight() + PixelOffset;
-            font->bind();
-            font->setMVPMatrices(*m.projection, mv);
-            font->render(markerRep.label(), x, y);
-            font->flush();
-        }
+        layout.setHorizontalAlignment(rtl ? TextLayout::HorizontalAlignment::Left : TextLayout::HorizontalAlignment::Right);
+        layout.begin(*m.projection, mv);
+        float labelOffset = markerRep.size() / 2.0f;
+        float x = labelOffset + PixelOffset;
+        if (rtl)
+            x = -x;
+        float y = -labelOffset - static_cast<float>(layout.getLineHeight()) + PixelOffset;
+        layout.moveAbsolute(x, y);
+        layout.render(markerRep.label());
+        layout.end();
     }
 }
 
 void
 Renderer::renderAnnotationLabel(const Annotation &a,
-                                FontStyle fs,
-                                int hOffset,
-                                int vOffset,
+                                TextLayout &layout,
+                                float hOffset,
+                                float vOffset,
                                 float depth,
                                 const Matrices &m)
 {
     glVertexAttrib(CelestiaGLProgram::ColorAttributeIndex, a.color);
 
-    Matrix4f mv = vecgl::translate(*m.modelview,
-                                   (int)a.position.x() + hOffset + PixelOffset,
-                                   (int)a.position.y() + vOffset + PixelOffset,
-                                   depth);
+    Matrix4f mv = math::translate(*m.modelview,
+                                     std::trunc(a.position.x()) + hOffset + PixelOffset,
+                                     std::trunc(a.position.y()) + vOffset + PixelOffset,
+                                     depth);
 
-    auto font = getFont(fs);
-    if (!font)
-        return;
-
-    font->bind();
-    font->setMVPMatrices(*m.projection, mv);
-    font->render(a.labelText, 0.0f, 0.0f);
-    font->flush();
+    layout.begin(*m.projection, mv);
+    layout.moveAbsolute(0.0f, 0.0f);
+    layout.render(a.labelText);
+    layout.end();
 }
 
 // stars and constellations. DSOs
@@ -5017,95 +4123,64 @@ void Renderer::renderAnnotations(const vector<Annotation>& annotations,
                                  FontStyle fs)
 {
     auto font = getFont(fs);
-    if (!font)
+    if (font == nullptr)
         return;
 
-    // Enable line smoothing for rendering symbols
-    enableSmoothLines();
-
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
-#endif
-    enableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    TextLayout layout{ screenDpi };
+    layout.setFont(font);
 
     Matrix4f mv = Matrix4f::Identity();
     Matrices m = { &m_orthoProjMatrix, &mv };
 
-    for (int i = 0; i < (int) annotations.size(); i++)
+    for (const auto &annotation : annotations)
     {
-        if (annotations[i].markerRep != nullptr)
+        if (annotation.markerRep != nullptr)
         {
-            renderAnnotationMarker(annotations[i], fs, 0.0f, m);
+            renderAnnotationMarker(annotation, layout, 0.0f, m);
         }
 
-        if (!annotations[i].labelText.empty())
+        if (!annotation.labelText.empty())
         {
-            int labelWidth = 0;
-            int hOffset = 2;
-            int vOffset = 0;
+            TextLayout::HorizontalAlignment alignment = TextLayout::HorizontalAlignment::Left;
+            float hOffset = 0.0f;
+            float vOffset = 0.0f;
 
-            switch (annotations[i].halign)
-            {
-            case AlignCenter:
-                labelWidth = (font->getWidth(annotations[i].labelText));
-                hOffset = -labelWidth / 2;
-                break;
+            getLabelAlignmentInfo(annotation, font.get(), alignment, hOffset, vOffset);
 
-            case AlignRight:
-                labelWidth = (font->getWidth(annotations[i].labelText));
-                hOffset = -(labelWidth + 2);
-                break;
-
-            case AlignLeft:
-                if (annotations[i].markerRep != nullptr)
-                    hOffset = 2 + (int) annotations[i].markerRep->size() / 2;
-                break;
-            }
-
-            switch (annotations[i].valign)
-            {
-            case VerticalAlignCenter:
-                vOffset = -font->getHeight() / 2;
-                break;
-            case VerticalAlignTop:
-                vOffset = -font->getHeight();
-                break;
-            case VerticalAlignBottom:
-                vOffset = 0;
-                break;
-            }
-            renderAnnotationLabel(annotations[i], fs, hOffset, vOffset, 0.0f, m);
+            layout.setHorizontalAlignment(alignment);
+            renderAnnotationLabel(annotation, layout, hOffset, vOffset, 0.0f, m);
         }
     }
-
-#ifdef USE_HDR
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-#endif
-
-    font->unbind();
-    disableSmoothLines();
 }
 
 
 void
 Renderer::renderBackgroundAnnotations(FontStyle fs)
 {
-    enableDepthTest();
-    renderAnnotations(backgroundAnnotations, fs);
-    disableDepthTest();
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthTest = true;
+    ps.smoothLines = true;
+    setPipelineState(ps);
 
-    clearAnnotations(backgroundAnnotations);
+    renderAnnotations(backgroundAnnotations, fs);
+    backgroundAnnotations.clear();
 }
 
 
 void
 Renderer::renderForegroundAnnotations(FontStyle fs)
 {
-    disableDepthTest();
-    renderAnnotations(foregroundAnnotations, fs);
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthMask = true;
+    ps.smoothLines = true;
+    setPipelineState(ps);
 
-    clearAnnotations(foregroundAnnotations);
+    renderAnnotations(foregroundAnnotations, fs);
+    foregroundAnnotations.clear();
 }
 
 
@@ -5116,6 +4191,14 @@ Renderer::renderSortedAnnotations(vector<Annotation>::iterator iter,
                                   float farDist,
                                   FontStyle fs)
 {
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthMask = true;
+    ps.depthTest = true;
+    ps.smoothLines = true;
+    setPipelineState(ps);
+
     return renderAnnotations(iter, depthSortedAnnotations.end(), nearDist, farDist, fs);
 }
 
@@ -5129,12 +4212,11 @@ Renderer::renderAnnotations(vector<Annotation>::iterator startIter,
                             FontStyle fs)
 {
     auto font = getFont(fs);
-    if (!font)
+    if (font == nullptr)
         return endIter;
 
-    enableDepthTest();
-    enableBlending();
-    setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    TextLayout layout{ screenDpi };
+    layout.setFont(font);
 
     Matrix4f mv = Matrix4f::Identity();
     Matrices m = { &m_orthoProjMatrix, &mv };
@@ -5142,40 +4224,32 @@ Renderer::renderAnnotations(vector<Annotation>::iterator startIter,
     // Precompute values that will be used to generate the normalized device z value;
     // we're effectively just handling the projection instead of OpenGL. We use an orthographic
     // projection matrix in order to get the label text position exactly right but need to mimic
-    // the depth coordinate generation of a perspective projection. For fisheye, just apply a
-    // linear transformation since fisheye uses orthographic projection already.
-    float d0 = farDist - nearDist;
-    float d1 = -(farDist + nearDist) / d0; // Used in perspective projection
-    float d2 = -2.0f * nearDist * farDist / d0; // Used in perspective projection
-    bool fisheye = projectionMode == ProjectionMode::FisheyeMode;
+    // the depth coordinate generation of a projection.
 
     vector<Annotation>::iterator iter = startIter;
-    for (; iter != endIter && iter->position.z() > nearDist; iter++)
+    for (; iter != endIter && iter->position.z() > nearDist; ++iter)
     {
         // Compute normalized device z
-        float z = fisheye ? (1.0f - (iter->position.z() - nearDist) / d0 * 2.0f) : (d1 + d2 / -iter->position.z());
-        float ndc_z = clamp(z, -1.0f, 1.0f);
-
-        // Offsets to left align label
-        int labelHOffset = 0;
-        int labelVOffset = 0;
+        float z = getProjectionMode()->getNormalizedDeviceZ(nearDist, farDist, iter->position.z());
+        float ndc_z = std::clamp(z, -1.0f, 1.0f);
 
         if (iter->markerRep != nullptr)
         {
-            renderAnnotationMarker(*iter, fs, ndc_z, m);
+            renderAnnotationMarker(*iter, layout, ndc_z, m);
         }
 
         if (!iter->labelText.empty())
         {
-            if (iter->markerRep != nullptr)
-                labelHOffset += (int) iter->markerRep->size() / 2 + 3;
+            TextLayout::HorizontalAlignment alignment = TextLayout::HorizontalAlignment::Left;
+            float labelHOffset = 0.0f;
+            float labelVOffset = 0.0f;
 
-            renderAnnotationLabel(*iter, fs, labelHOffset, labelVOffset, ndc_z, m);
+            getLabelAlignmentInfo(*iter, font.get(), alignment, labelHOffset, labelVOffset);
+
+            layout.setHorizontalAlignment(alignment);
+            renderAnnotationLabel(*iter, layout, labelHOffset, labelVOffset, ndc_z, m);
         }
     }
-
-    disableDepthTest();
-    font->unbind();
 
     return iter;
 }
@@ -5186,7 +4260,7 @@ void Renderer::markersToAnnotations(const celestia::MarkerList& markers,
                                     double jd)
 {
     const UniversalCoord& cameraPosition = observer.getPosition();
-    const Quaterniond& cameraOrientation = observer.getOrientation();
+    const Quaterniond& cameraOrientation = getCameraOrientation();
     Vector3d viewVector = cameraOrientation.conjugate() * -Vector3d::UnitZ();
 
     for (const auto& marker : markers)
@@ -5229,7 +4303,7 @@ void Renderer::markersToAnnotations(const celestia::MarkerList& markers,
             addAnnotation(*a, &(marker.representation()), "",
                           marker.representation().color(),
                           offset.cast<float>(),
-                          AlignLeft, VerticalAlignTop, symbolSize);
+                          LabelHorizontalAlignment::Start, LabelVerticalAlignment::Top, symbolSize);
         }
     }
 }
@@ -5264,22 +4338,23 @@ void Renderer::loadTextures(Body* body)
         surface.specularTexture.tex[textureResolution] != InvalidResource)
         surface.specularTexture.find(textureResolution);
 
-    if ((renderFlags & ShowCloudMaps) != 0 &&
-        body->getAtmosphere() != nullptr &&
-        body->getAtmosphere()->cloudTexture.tex[textureResolution] != InvalidResource)
+    const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
+    if ((renderFlags & ShowCloudMaps) != 0)
     {
-        body->getAtmosphere()->cloudTexture.find(textureResolution);
+        Atmosphere* atmosphere = bodyFeaturesManager->getAtmosphere(body);
+        if (atmosphere != nullptr && atmosphere->cloudTexture.tex[textureResolution] != InvalidResource)
+            atmosphere->cloudTexture.find(textureResolution);
     }
 
-    if (body->getRings() != nullptr &&
-        body->getRings()->texture.tex[textureResolution] != InvalidResource)
+    if (auto rings = bodyFeaturesManager->getRings(body);
+        rings != nullptr && rings->texture.tex[textureResolution] != InvalidResource)
     {
-        body->getRings()->texture.find(textureResolution);
+        rings->texture.find(textureResolution);
     }
 
     if (body->getGeometry() != InvalidResource)
     {
-        Geometry* geometry = GetGeometryManager()->find(body->getGeometry());
+        Geometry* geometry = engine::GetGeometryManager()->find(body->getGeometry());
         if (geometry != nullptr)
         {
             geometry->loadTextures();
@@ -5335,168 +4410,105 @@ void Renderer::updateBodyVisibilityMask()
     // Bodies with type `Invisible' (e.g. ReferencePoints) are not drawn,
     // but if their property `Visible' is set they have visible labels,
     // so we make `Body::Invisible' class visible.
-    int flags = Body::Invisible;
+    BodyClassification flags = BodyClassification::Invisible;
 
     if ((renderFlags & Renderer::ShowPlanets) != 0)
-        flags |= Body::Planet;
+        flags |= BodyClassification::Planet;
     if ((renderFlags & Renderer::ShowDwarfPlanets) != 0)
-        flags |= Body::DwarfPlanet;
+        flags |= BodyClassification::DwarfPlanet;
     if ((renderFlags & Renderer::ShowMoons) != 0)
-        flags |= Body::Moon;
+        flags |= BodyClassification::Moon;
     if ((renderFlags & Renderer::ShowMinorMoons) != 0)
-        flags |= Body::MinorMoon;
+        flags |= BodyClassification::MinorMoon;
     if ((renderFlags & Renderer::ShowAsteroids) != 0)
-        flags |= Body::Asteroid;
+        flags |= BodyClassification::Asteroid;
     if ((renderFlags & Renderer::ShowComets) != 0)
-        flags |= Body::Comet;
+        flags |= BodyClassification::Comet;
     if ((renderFlags & Renderer::ShowSpacecrafts) != 0)
-        flags |= Body::Spacecraft;
+        flags |= BodyClassification::Spacecraft;
 
     bodyVisibilityMask = flags;
 }
 
 void Renderer::setSolarSystemMaxDistance(float t)
 {
-    SolarSystemMaxDistance = clamp(t, 1.0f, 10.0f);
+    SolarSystemMaxDistance = std::clamp(t, 1.0f, 10.0f);
 }
+
 
 void Renderer::getViewport(int* x, int* y, int* w, int* h) const
 {
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
     if (x != nullptr)
-        *x = viewport[0];
+        *x = m_viewport[0];
     if (y != nullptr)
-        *y = viewport[1];
+        *y = m_viewport[1];
     if (w != nullptr)
-        *w = viewport[2];
+        *w = m_viewport[2];
     if (h != nullptr)
-        *h = viewport[3];
+        *h = m_viewport[3];
 }
 
 void Renderer::getViewport(std::array<int, 4>& viewport) const
 {
     static_assert(sizeof(int) == sizeof(GLint), "int and GLint size mismatch");
-    glGetIntegerv(GL_VIEWPORT, &viewport[0]);
+    std::copy(std::begin(m_viewport), std::end(m_viewport), std::begin(viewport));
 }
 
-void Renderer::setViewport(int x, int y, int w, int h) const
+void Renderer::setViewport(int x, int y, int w, int h)
 {
+    m_viewport = {x, y, w, h};
     glViewport(x, y, w, h);
 }
 
-void Renderer::setViewport(const std::array<int, 4>& viewport) const
+void Renderer::setViewport(const std::array<int, 4>& viewport)
 {
+    std::copy(std::begin(viewport), std::end(viewport), std::begin(m_viewport));
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
 }
 
 void Renderer::setScissor(int x, int y, int w, int h)
 {
-    if (!m_GLState.scissor)
+    if (!m_pipelineState.scissor)
     {
         glEnable(GL_SCISSOR_TEST);
-        m_GLState.scissor = true;
+        m_pipelineState.scissor = true;
     }
     glScissor(x, y, w, h);
 }
 
 void Renderer::removeScissor()
 {
-    if (m_GLState.scissor)
+    if (m_pipelineState.scissor)
     {
         glDisable(GL_SCISSOR_TEST);
-        m_GLState.scissor = false;
+        m_pipelineState.scissor = false;
     }
 }
 
 void Renderer::enableMSAA() noexcept
 {
 #ifndef GL_ES
-    if (!m_GLState.multisample)
+    if (!m_pipelineState.multisample)
     {
         glEnable(GL_MULTISAMPLE);
-        m_GLState.multisample = true;
+        m_pipelineState.multisample = true;
     }
 #endif
 }
 void Renderer::disableMSAA() noexcept
 {
 #ifndef GL_ES
-    if (m_GLState.multisample)
+    if (m_pipelineState.multisample)
     {
         glDisable(GL_MULTISAMPLE);
-        m_GLState.multisample = false;
+        m_pipelineState.multisample = false;
     }
 #endif
 }
 
 bool Renderer::isMSAAEnabled() const noexcept
 {
-    return m_GLState.multisample;
-}
-
-void Renderer::enableBlending() noexcept
-{
-    if (!m_GLState.blending)
-    {
-        glEnable(GL_BLEND);
-        m_GLState.blending = true;
-    }
-}
-
-void Renderer::disableBlending() noexcept
-{
-    if (m_GLState.blending)
-    {
-        glDisable(GL_BLEND);
-        m_GLState.blending = false;
-    }
-}
-
-void Renderer::setBlendingFactors(GLenum sfactor, GLenum dfactor) noexcept
-{
-    if (m_GLState.sfactor != sfactor || m_GLState.dfactor != dfactor)
-    {
-        glBlendFunc(sfactor, dfactor);
-        m_GLState.sfactor = sfactor;
-        m_GLState.dfactor = dfactor;
-    }
-}
-
-void Renderer::enableDepthMask() noexcept
-{
-    if (!m_GLState.depthMask)
-    {
-        glDepthMask(GL_TRUE);
-        m_GLState.depthMask = true;
-    }
-}
-
-void Renderer::disableDepthMask() noexcept
-{
-    if (m_GLState.depthMask)
-    {
-        glDepthMask(GL_FALSE);
-        m_GLState.depthMask = false;
-    }
-}
-
-void Renderer::enableDepthTest() noexcept
-{
-    if (!m_GLState.depthTest)
-    {
-        glEnable(GL_DEPTH_TEST);
-        m_GLState.depthTest = true;
-    }
-}
-
-void Renderer::disableDepthTest() noexcept
-{
-    if (m_GLState.depthTest)
-    {
-        glDisable(GL_DEPTH_TEST);
-        m_GLState.depthTest = false;
-    }
+    return m_pipelineState.multisample;
 }
 
 constexpr GLenum toGLFormat(PixelFormat format)
@@ -5530,9 +4542,12 @@ bool Renderer::captureFrame(int x, int y, int w, int h, PixelFormat format, unsi
     if (!ok)
         return false;
 
-    if (!gl::MESA_pack_invert)
+#ifndef GL_ES
+    if (!detailOptions.useMesaPackInvert)
+#endif
     {
         int realWidth = w * formatWidth(format);
+        realWidth = (realWidth + 3) & ~0x3;
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
         uint8_t tempLine[realWidth]; // G++ supports VLA as an extension
 #else
@@ -5549,122 +4564,110 @@ bool Renderer::captureFrame(int x, int y, int w, int h, PixelFormat format, unsi
     return ok;
 }
 
-void Renderer::drawRectangle(const celestia::Rect &r, int fishEyeOverrideMode, const Eigen::Matrix4f& p, const Eigen::Matrix4f& m)
+static void draw_rectangle_border(const Renderer &renderer,
+                                  const celestia::Rect &rect,
+                                  FisheyeOverrideMode fishEyeOverrideMode,
+                                  const Eigen::Matrix4f& p,
+                                  const Eigen::Matrix4f& m)
+{
+    LineRenderer lr(renderer, rect.lw, LineRenderer::PrimType::LineStrip);
+    if (fishEyeOverrideMode == FisheyeOverrideMode::Disabled)
+        lr.setHints(LineRenderer::DISABLE_FISHEYE_TRANFORMATION);
+    lr.startUpdate();
+    lr.addVertex(rect.x,          rect.y);
+    lr.addVertex(rect.x + rect.w, rect.y);
+    lr.addVertex(rect.x + rect.w, rect.y + rect.h);
+    lr.addVertex(rect.x,          rect.y + rect.h);
+    lr.addVertex(rect.x,          rect.y);
+    lr.render({&p, &m}, rect.colors[0], 4);
+    lr.finish();
+}
+
+static void draw_rectangle_solid(const Renderer &renderer,
+                                 const celestia::Rect &r,
+                                 FisheyeOverrideMode fishEyeOverrideMode,
+                                 const Eigen::Matrix4f& p,
+                                 const Eigen::Matrix4f& m)
 {
     ShaderProperties shadprop;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
-
-    bool solid = r.type != celestia::Rect::Type::BorderOnly;
-    bool lineAsTriangles = false;
-    if (!solid)
-    {
-        lineAsTriangles = shouldDrawLineAsTriangles();
-        if (lineAsTriangles)
-            shadprop.texUsage |= ShaderProperties::LineAsTriangles;
-    }
-
-    if (r.nColors > 0)
-        shadprop.texUsage |= ShaderProperties::VertexColors;
+    shadprop.lightModel = LightingModel::UnlitModel;
+    if (r.hasColors)
+        shadprop.texUsage |= TexUsage::VertexColors;
     if (r.tex != nullptr)
-        shadprop.texUsage |= ShaderProperties::DiffuseTexture;
+        shadprop.texUsage |= TexUsage::DiffuseTexture;
 
     shadprop.fishEyeOverride = fishEyeOverrideMode;
 
-    auto *prog = getShaderManager().getShader(shadprop);
+    auto *prog = renderer.getShaderManager().getShader(shadprop);
     if (prog == nullptr)
         return;
 
-    constexpr array<short, 8> texels = {0, 1,  1, 1,  1, 0,  0, 0};
-    array<float, 8> vertices = { r.x, r.y,  r.x+r.w, r.y, r.x+r.w, r.y+r.h, r.x, r.y+r.h };
-    array<float, 80> lineAsTriangleVertices = {
-        r.x,       r.y,       r.x + r.w, r.y,       -0.5,
-        r.x,       r.y,       r.x + r.w, r.y,        0.5,
-
-        r.x + r.w, r.y,       r.x,       r.y,       -0.5,
-        r.x + r.w, r.y,       r.x,       r.y,        0.5,
-
-        r.x + r.w, r.y,       r.x + r.w, r.y + r.h, -0.5,
-        r.x + r.w, r.y,       r.x + r.w, r.y + r.h,  0.5,
-
-        r.x + r.w, r.y + r.h, r.x + r.w, r.y,       -0.5,
-        r.x + r.w, r.y + r.h, r.x + r.w, r.y,        0.5,
-
-        r.x + r.w, r.y + r.h, r.x,       r.y + r.h, -0.5,
-        r.x + r.w, r.y + r.h, r.x,       r.y + r.h,  0.5,
-
-        r.x,       r.y + r.h, r.x + r.w, r.y + r.h, -0.5,
-        r.x,       r.y + r.h, r.x + r.w, r.y + r.h,  0.5,
-
-        r.x,       r.y + r.h, r.x,       r.y,       -0.5,
-        r.x,       r.y + r.h, r.x,       r.y,        0.5,
-
-        r.x,       r.y,       r.x,       r.y + r.h, -0.5,
-        r.x,       r.y,       r.x,       r.y + r.h,  0.5,
+    struct RectVtx
+    {
+        float x, y, u, v; // NOSONAR
+        uint8_t color[4]; // NOSONAR
     };
-    constexpr array<short, 24> lineAsTriangleIndcies = {
-        0,  1,  2,   2,  3,  0,
-        4,  5,  6,   6,  7,  4,
-        8,  9,  10,  10, 11, 8,
-        12, 13, 14,  14, 15, 12
+
+    array<RectVtx, 4> vertices = {
+        RectVtx{ r.x,       r.y,       0.0f, 1.0f, {} },
+        RectVtx{ r.x + r.w, r.y,       1.0f, 1.0f, {} },
+        RectVtx{ r.x + r.w, r.y + r.h, 1.0f, 0.0f, {} },
+        RectVtx{ r.x,       r.y + r.h, 0.0f, 0.0f, {} },
     };
+
+    if (r.hasColors)
+    {
+        for (int i = 0; i < 4; i++)
+            r.colors[i].get(vertices[i].color);
+    }
+
+    static GLuint vbo = 0u;
+    if (vbo == 0u)
+        glGenBuffers(1, &vbo);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(RectVtx), vertices.data(), GL_STREAM_DRAW);
 
     glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    if (lineAsTriangles)
-    {
-        glEnableVertexAttribArray(CelestiaGLProgram::NextVCoordAttributeIndex);
-        glEnableVertexAttribArray(CelestiaGLProgram::ScaleFactorAttributeIndex);
-        glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 5, lineAsTriangleVertices.data());
-        glVertexAttribPointer(CelestiaGLProgram::NextVCoordAttributeIndex,
-                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 5, lineAsTriangleVertices.data() + 2);
-        glVertexAttribPointer(CelestiaGLProgram::ScaleFactorAttributeIndex,
-                              1, GL_FLOAT, GL_FALSE, sizeof(float) * 5, lineAsTriangleVertices.data() + 4);
-    }
-    else
-    {
-        glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                      2, GL_FLOAT, GL_FALSE, 0, vertices.data());
-    }
+    glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
+                          2, GL_FLOAT, GL_FALSE, sizeof(RectVtx), reinterpret_cast<void*>(offsetof(RectVtx, x))); //NOSONAR
+
     if (r.tex != nullptr)
     {
         glEnableVertexAttribArray(CelestiaGLProgram::TextureCoord0AttributeIndex);
         glVertexAttribPointer(CelestiaGLProgram::TextureCoord0AttributeIndex,
-                              2, GL_SHORT, GL_FALSE, 0, texels.data());
+                              2, GL_FLOAT, GL_FALSE, sizeof(RectVtx), reinterpret_cast<void*>(offsetof(RectVtx, u))); //NOSONAR
         r.tex->bind();
     }
-    if (r.nColors == 4)
+    if (r.hasColors)
     {
         glEnableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
         glVertexAttribPointer(CelestiaGLProgram::ColorAttributeIndex,
-                             4, GL_UNSIGNED_BYTE, GL_TRUE, 0, r.colors.data());
-    }
-    else if (r.nColors == 1)
-    {
-        glVertexAttrib(CelestiaGLProgram::ColorAttributeIndex, r.colors[0]);
+                             4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(RectVtx), reinterpret_cast<void*>(offsetof(RectVtx, color))); //NOSONAR
     }
 
     prog->use();
     prog->setMVPMatrices(p, m);
 
-    if (lineAsTriangles)
-    {
-        prog->lineWidthX = getLineWidthX() * r.lw;
-        prog->lineWidthY = getLineWidthY() * r.lw;
-        glDrawElements(GL_TRIANGLES, lineAsTriangleIndcies.size(), GL_UNSIGNED_SHORT, lineAsTriangleIndcies.data());
-    }
-    else
-    {
-        glDrawArrays(solid ? GL_TRIANGLE_FAN : GL_LINE_LOOP, 0, 4);
-    }
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
     glDisableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::TextureCoord0AttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    if (lineAsTriangles)
-    {
-        glDisableVertexAttribArray(CelestiaGLProgram::NextVCoordAttributeIndex);
-        glDisableVertexAttribArray(CelestiaGLProgram::ScaleFactorAttributeIndex);
-    }
+    if (r.tex != nullptr)
+        glDisableVertexAttribArray(CelestiaGLProgram::TextureCoord0AttributeIndex);
+    if (r.hasColors)
+        glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void Renderer::drawRectangle(const celestia::Rect &r,
+                             FisheyeOverrideMode fishEyeOverrideMode,
+                             const Eigen::Matrix4f& p,
+                             const Eigen::Matrix4f& m) const
+{
+    if(r.type == celestia::Rect::Type::BorderOnly)
+        draw_rectangle_border(*this, r, fishEyeOverrideMode, p, m);
+    else
+        draw_rectangle_solid(*this, r, fishEyeOverrideMode, p, m);
 }
 
 void Renderer::setRenderRegion(int x, int y, int width, int height, bool withScissor)
@@ -5707,15 +4710,31 @@ bool Renderer::getInfo(map<string, string>& info) const
         info["LanguageVersion"] = s;
     }
 
+    GLint redBits = 0;
+    GLint greenBits = 0;
+    GLint blueBits = 0;
+    GLint alphaBits = 0;
+    GLint depthBits = 0;
+    glGetIntegerv(GL_RED_BITS, &redBits);
+    glGetIntegerv(GL_GREEN_BITS, &greenBits);
+    glGetIntegerv(GL_BLUE_BITS, &blueBits);
+    glGetIntegerv(GL_ALPHA_BITS, &alphaBits);
+    glGetIntegerv(GL_DEPTH_BITS, &depthBits);
+
+    if (alphaBits == 0)
+        info["ColorComponent"] = fmt::format("RGB{}{}{}", redBits, greenBits, blueBits);
+    else
+        info["ColorComponent"] = fmt::format("RGBA{}{}{}{}", redBits, greenBits, blueBits, alphaBits);
+
+    info["DepthComponent"] = to_string(depthBits);
+
     GLint maxTextureSize = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
     info["MaxTextureSize"] = to_string(maxTextureSize);
 
-#ifndef GL_ES
     GLint maxTextureUnits = 1;
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &maxTextureUnits);
+    glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxTextureUnits);
     info["MaxTextureUnits"] = to_string(maxTextureUnits);
-#endif
 
     GLint pointSizeRange[2];
     GLfloat lineWidthRange[2];
@@ -5734,19 +4753,19 @@ bool Renderer::getInfo(map<string, string>& info) const
 #ifndef GL_ES
     GLfloat pointSizeGran = 0;
     glGetFloatv(GL_SMOOTH_POINT_SIZE_GRANULARITY, &pointSizeGran);
-    info["PointSizeGran"] = fmt::sprintf("%.2f", pointSizeGran);
+    info["PointSizeGran"] = fmt::format("{:.2f}", pointSizeGran);
 
     GLint maxVaryings = 0;
     glGetIntegerv(GL_MAX_VARYING_FLOATS, &maxVaryings);
     info["MaxVaryingFloats"] = to_string(maxVaryings);
+#endif
 
     if (gl::EXT_texture_filter_anisotropic)
     {
         float maxAnisotropy = 0.0f;
         glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAnisotropy);
-        info["MaxAnisotropy"] = fmt::sprintf("%.2f", maxAnisotropy);
+        info["MaxAnisotropy"] = fmt::format("{:.2f}", maxAnisotropy);
     }
-#endif
 
 #if 0 // we don't use cubemaps yet
     GLint maxCubeMapSize = 0;
@@ -5761,16 +4780,6 @@ bool Renderer::getInfo(map<string, string>& info) const
     return true;
 }
 
-celgl::VertexObject&
-Renderer::getVertexObject(VOType owner, GLenum type, GLsizeiptr size, GLenum stream)
-{
-    auto i = static_cast<size_t>(owner);
-    if (m_VertexObjects[i] == nullptr)
-        m_VertexObjects[i] = new celgl::VertexObject(type, size, stream);
-
-    return *m_VertexObjects[i];
-}
-
 FramebufferObject*
 Renderer::getShadowFBO(int index) const
 {
@@ -5780,12 +4789,12 @@ Renderer::getShadowFBO(int index) const
 void
 Renderer::createShadowFBO()
 {
-    m_shadowFBO = unique_ptr<FramebufferObject>(new FramebufferObject(m_shadowMapSize,
-                                                                      m_shadowMapSize,
-                                                                      FramebufferObject::DepthAttachment));
+    m_shadowFBO = std::make_unique<FramebufferObject>(m_shadowMapSize,
+                                                      m_shadowMapSize,
+                                                      FramebufferObject::DepthAttachment);
     if (!m_shadowFBO->isValid())
     {
-        clog << "Error creating shadow FBO.\n";
+        GetLogger()->warn("Error creating shadow FBO.\n");
         m_shadowFBO = nullptr;
     }
 }
@@ -5793,11 +4802,7 @@ Renderer::createShadowFBO()
 void
 Renderer::setShadowMapSize(unsigned size)
 {
-    if (!FramebufferObject::isSupported())
-        return;
-    GLint t = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &t);
-    m_shadowMapSize = clamp(size, 0u, static_cast<unsigned>(t));
+    m_shadowMapSize = std::min(size, static_cast<unsigned>(gl::maxTextureSize));
     if (m_shadowFBO != nullptr && m_shadowMapSize == m_shadowFBO->width())
         return;
     if (m_shadowMapSize == 0)
@@ -5807,15 +4812,12 @@ Renderer::setShadowMapSize(unsigned size)
 }
 
 void
-Renderer::removeInvisibleItems(const Frustum &frustum)
+Renderer::removeInvisibleItems(const math::InfiniteFrustum &frustum)
 {
     // Remove objects from the render list that lie completely outside the
     // view frustum.
     auto notCulled = renderList.begin();
-#ifdef USE_HDR
-    maxBodyMag = maxBodyMagPrev;
-    float starMaxMag = maxBodyMagPrev;
-#endif
+    const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
     for (auto &ri : renderList)
     {
         bool convex = true;
@@ -5839,9 +4841,9 @@ Renderer::removeInvisibleItems(const Frustum &frustum)
 
         case RenderListEntry::RenderableBody:
             radius = ri.body->getBoundingRadius();
-            if (ri.body->getRings() != nullptr)
+            if (const RingSystem* rings = bodyFeaturesManager->getRings(ri.body); rings != nullptr)
             {
-                radius = ri.body->getRings()->outerRadius;
+                radius = rings->outerRadius;
                 convex = false;
             }
 
@@ -5849,12 +4851,11 @@ Renderer::removeInvisibleItems(const Frustum &frustum)
                 convex = false;
 
             cullRadius = radius;
-            if (ri.body->getAtmosphere() != nullptr)
+            if (const Atmosphere* atmosphere = bodyFeaturesManager->getAtmosphere(ri.body); atmosphere != nullptr)
             {
-                auto *a = ri.body->getAtmosphere();
-                cullRadius += a->height;
-                cloudHeight = max(a->cloudHeight,
-                                  a->mieScaleHeight * -log(AtmosphereExtinctionThreshold));
+                cullRadius += atmosphere->height;
+                cloudHeight = max(atmosphere->cloudHeight,
+                                  atmosphere->mieScaleHeight * -log(AtmosphereExtinctionThreshold));
             }
             break;
 
@@ -5862,13 +4863,13 @@ Renderer::removeInvisibleItems(const Frustum &frustum)
             break;
         }
 
-        Vector3f center = getCameraOrientation().toRotationMatrix() * ri.position;
+        Vector3f center = getCameraOrientationf().toRotationMatrix() * ri.position;
         // Test the object's bounding sphere against the view frustum
-        if (frustum.testSphere(center, cullRadius) != Frustum::Outside)
+        if (frustum.testSphere(center, cullRadius) != math::FrustumAspect::Outside)
         {
             float nearZ = center.norm() - radius;
             float maxSpan = hypot((float) windowWidth, (float) windowHeight);
-            float nearZcoeff = cos(degToRad(fov / 2.0f)) * ((float) windowHeight / maxSpan);
+            float nearZcoeff = cos(math::degToRad(fov / 2.0f)) * ((float) windowHeight / maxSpan);
             nearZ = -nearZ * nearZcoeff;
 
             if (nearZ > -MinNearPlaneDistance)
@@ -5911,29 +4912,16 @@ Renderer::removeInvisibleItems(const Frustum &frustum)
                     // If there's a cloud layer, we need to move the
                     // far plane out so that the clouds aren't clipped
                     float cloudLayerRadius = eradius + cloudHeight;
-                    ri.farZ -= sqrt(square(cloudLayerRadius) - square(eradius));
+                    ri.farZ -= sqrt(math::square(cloudLayerRadius) - math::square(eradius));
                 }
             }
 
             *notCulled = ri;
             notCulled++;
-#ifdef USE_HDR
-            if (ri.discSizeInPixels > 1.0f && ri.appMag < starMaxMag)
-            {
-                starMaxMag = ri.appMag;
-                brightestStar = ri.star;
-                foundBrightestStar = true;
-            }
-            maxBodyMag = min(maxBodyMag, starMaxMag);
-            foundClosestBody = true;
-#endif
         }
     }
 
     renderList.resize(notCulled - renderList.begin());
-#ifdef USE_HDR
-    saturationMag = maxBodyMag;
-#endif // USE_HDR
 
     // The calls to buildRenderLists/renderStars filled renderList
     // with visible bodies.  Sort it front to back, then
@@ -5947,24 +4935,20 @@ Renderer::removeInvisibleItems(const Frustum &frustum)
 bool
 Renderer::selectionToAnnotation(const Selection &sel,
                                 const Observer &observer,
-                                const Frustum &xfrustum,
+                                const math::InfiniteFrustum &xfrustum,
                                 double jd)
 {
     Vector3d offset = sel.getPosition(jd).offsetFromKm(observer.getPosition());
 
     static celestia::MarkerRepresentation cursorRep(celestia::MarkerRepresentation::Crosshair);
-    if (xfrustum.testSphere(offset, sel.radius()) == Frustum::Outside)
+    if (xfrustum.testSphere(offset, sel.radius()) == math::FrustumAspect::Outside)
         return false;
 
     double distance = offset.norm();
     float symbolSize = (float)(sel.radius() / distance) / pixelSize;
 
     // Modify the marker position so that it is always in front of the marked object.
-    double boundingRadius;
-    if (sel.body() != nullptr)
-        boundingRadius = sel.body()->getBoundingRadius();
-    else
-        boundingRadius = sel.radius();
+    double boundingRadius = sel.body() != nullptr ? sel.body()->getBoundingRadius() : sel.radius();
     offset *= (1.0 - boundingRadius * 1.01 / distance);
 
     // The selection cursor is only partially visible when the selected object is obscured. To implement
@@ -5975,13 +4959,13 @@ Renderer::selectionToAnnotation(const Selection &sel,
     {
         addSortedAnnotation(&cursorRep, "", SelectionCursorColor,
                             offset.cast<float>(),
-                            AlignLeft, VerticalAlignTop, symbolSize);
+                            LabelHorizontalAlignment::Start, LabelVerticalAlignment::Top, symbolSize);
     }
     else
     {
         addBackgroundAnnotation(&cursorRep, "", SelectionCursorColor,
                                 offset.cast<float>(),
-                                AlignLeft, VerticalAlignTop, symbolSize);
+                                LabelHorizontalAlignment::Start, LabelVerticalAlignment::Top, symbolSize);
     }
 
     Color occludedCursorColor(SelectionCursorColor.red(),
@@ -5990,7 +4974,7 @@ Renderer::selectionToAnnotation(const Selection &sel,
                               0.4f);
     addForegroundAnnotation(&cursorRep, "", occludedCursorColor,
                             offset.cast<float>(),
-                            AlignLeft, VerticalAlignTop, symbolSize);
+                            LabelHorizontalAlignment::Start, LabelVerticalAlignment::Top, symbolSize);
     return true;
 }
 
@@ -5999,6 +4983,7 @@ Renderer::adjustMagnitudeInsideAtmosphere(float &faintestMag,
                                           float &saturationMag,
                                           double now)
 {
+    const BodyFeaturesManager* bodyFeaturesManager = GetBodyFeaturesManager();
     for (const auto& ri : renderList)
     {
         if (ri.renderableType != RenderListEntry::RenderableBody)
@@ -6008,7 +4993,7 @@ Renderer::adjustMagnitudeInsideAtmosphere(float &faintestMag,
         // the amount light scattering.  It's complicated by the
         // possibility that the planet is oblate and a simple distance
         // to sphere calculation will not suffice.
-        const Atmosphere* atmosphere = ri.body->getAtmosphere();
+        const Atmosphere* atmosphere = bodyFeaturesManager->getAtmosphere(ri.body);
         if (atmosphere == nullptr || atmosphere->height <= 0.0f)
             continue;
 
@@ -6030,19 +5015,11 @@ Renderer::adjustMagnitudeInsideAtmosphere(float &faintestMag,
         if (ellipDist >= atmosphere->height / radius)
             continue;
 
-        float density = 1.0f - ellipDist / (atmosphere->height / radius);
-        if (density > 1.0f)
-            density = 1.0f;
+        float density = std::min(1.0f, 1.0f - ellipDist / (atmosphere->height / radius));
 
         Vector3f sunDir = ri.sun.normalized();
         Vector3f normal = -ri.position.normalized();
-#ifdef USE_HDR
-        // Ignore magnitude of planet underneath when lighting atmosphere
-        // Could be changed to simulate light pollution, etc
-        maxBodyMag = maxBodyMagPrev;
-        saturationMag = maxBodyMag;
-#endif
-        float illumination = clamp(sunDir.dot(normal) + 0.2f);
+        float illumination = std::clamp(sunDir.dot(normal) + 0.2f, 0.0f, 1.0f);
 
         float lightness = illumination * density;
         faintestMag = faintestMag - 15.0f * lightness;
@@ -6053,18 +5030,23 @@ Renderer::adjustMagnitudeInsideAtmosphere(float &faintestMag,
 void
 Renderer::buildNearSystemsLists(const Universe &universe,
                                 const Observer &observer,
-                                const Frustum &xfrustum,
+                                const math::InfiniteFrustum &xfrustum,
                                 double now)
 {
     UniversalCoord observerPos = observer.getPosition();
-    Eigen::Quaterniond observerOrient = observer.getOrientation();
+    Eigen::Quaterniond observerOrient = getCameraOrientation();
 
     universe.getNearStars(observerPos, SolarSystemMaxDistance, nearStars);
 
     // Set up direct light sources (i.e. just stars at the moment)
     // Skip if only star orbits to be shown
     if ((renderFlags & ShowSolarSystemObjects) != 0)
-        setupLightSources(nearStars, observerPos, now, lightSourceList, renderFlags);
+        setupLightSources(nearStars,
+                          observerPos,
+                          now,
+                          lightSourceList,
+                          tintSaturation,
+                          starColors.type() == ColorTableType::Enhanced ? nullptr : &tintColors);
 
     // Traverse the frame trees of each nearby solar system and
     // build the list of objects to be rendered.
@@ -6075,7 +5057,7 @@ Renderer::buildNearSystemsLists(const Universe &universe,
         if ((renderFlags & ShowSolarSystemObjects) == 0)
             continue;
 
-        SolarSystem* solarSystem = universe.getSolarSystem(sun);
+        const SolarSystem* solarSystem = universe.getSolarSystem(sun);
         if (solarSystem == nullptr)
             continue;
 
@@ -6275,18 +5257,11 @@ Renderer::renderSolarSystemObjects(const Observer &observer,
 
         // Set up a perspective projection using the current interval's near and
         // far clip planes.
-        float aspectRatio = getAspectRatio();
         Matrix4f proj;
-        if (getProjectionMode() == Renderer::ProjectionMode::FisheyeMode)
-            proj = Ortho(-aspectRatio, aspectRatio, -1.0f, 1.0f, nearPlaneDistance, farPlaneDistance);
-        else
-            proj = Perspective(fov, aspectRatio, nearPlaneDistance, farPlaneDistance);
+        buildProjectionMatrix(proj, nearPlaneDistance, farPlaneDistance, observer.getZoom());
         Matrices m = { &proj, &m_modelMatrix };
 
-        Frustum intervalFrustum(degToRad(fov),
-                                aspectRatio,
-                                nearPlaneDistance,
-                                farPlaneDistance);
+        setCurrentProjectionMatrix(proj);
 
         int firstInInterval = i;
 
@@ -6308,13 +5283,7 @@ Renderer::renderSolarSystemObjects(const Observer &observer,
         // Render orbit paths
         if (!orbitPathList.empty())
         {
-            disableDepthMask();
-#ifdef USE_HDR
-            setBlendingFactors(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
-#else
-            setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#endif
-            enableSmoothLines();
+            math::Frustum intervalFrustum = projectionMode->getFrustum(nearPlaneDistance, farPlaneDistance, observer.getZoom());
 
             // Scan through the list of orbits and render any that overlap this interval
             for (const auto& orbit : orbitPathList)
@@ -6328,15 +5297,12 @@ Renderer::renderSolarSystemObjects(const Observer &observer,
                 if (nearZ < farPlaneDistance && farZ > nearPlaneDistance)
                 {
                     renderOrbit(orbit, now,
-                                observer.getOrientation(),
+                                getCameraOrientation(),
                                 intervalFrustum,
                                 nearPlaneDistance,
-                                farPlaneDistance,
-                                m);
+                                farPlaneDistance);
                 }
             }
-
-            disableSmoothLines();
         }
 
         // Render transparent objects in the second pass
@@ -6349,16 +5315,79 @@ Renderer::renderSolarSystemObjects(const Observer &observer,
             i--;
         }
 
+        Renderer::PipelineState ps;
+        ps.blending = true;
+        ps.blendFunc = {GL_SRC_ALPHA, GL_ONE};
+        ps.depthTest = true;
+        setPipelineState(ps);
+
+        PointStarVertexBuffer::enable();
+        glareVertexBuffer->startSprites();
+        glareVertexBuffer->render();
+        glareVertexBuffer->finish();
+        if (starStyle == PointStars)
+            pointStarVertexBuffer->startBasicPoints();
+        else
+            pointStarVertexBuffer->startSprites();
+        pointStarVertexBuffer->render();
+        pointStarVertexBuffer->finish();
+        PointStarVertexBuffer::disable();
+
         // Render annotations in this interval
-        enableSmoothLines();
         annotation = renderSortedAnnotations(annotation,
                                              nearPlaneDistance,
                                              farPlaneDistance,
                                              FontNormal);
         endObjectAnnotations();
-        disableSmoothLines();
     }
 
     // reset the depth range
     glDepthRange(0, 1);
+    setDefaultProjectionMatrix();
+}
+
+void
+Renderer::setPipelineState(const Renderer::PipelineState &ps) noexcept
+{
+    if (ps.blending != m_pipelineState.blending)
+    {
+        if (ps.blending)
+            glEnable(GL_BLEND);
+        else
+            glDisable(GL_BLEND);
+        m_pipelineState.blending = ps.blending;
+    }
+    if (ps.blending && (ps.blendFunc.src != m_pipelineState.blendFunc.src || ps.blendFunc.dst != m_pipelineState.blendFunc.dst))
+    {
+        glBlendFuncSeparate(ps.blendFunc.src, ps.blendFunc.dst, GL_ZERO, GL_ONE);
+        m_pipelineState.blendFunc = ps.blendFunc;
+    }
+    if (ps.depthTest != m_pipelineState.depthTest)
+    {
+        if (ps.depthTest)
+            glEnable(GL_DEPTH_TEST);
+        else
+            glDisable(GL_DEPTH_TEST);
+        m_pipelineState.depthTest = ps.depthTest;
+    }
+    if (ps.depthMask != m_pipelineState.depthMask)
+    {
+        glDepthMask(ps.depthMask ? GL_TRUE : GL_FALSE);
+        m_pipelineState.depthMask = ps.depthMask;
+    }
+    if (ps.smoothLines != m_pipelineState.smoothLines)
+    {
+#ifndef GL_ES
+        if (ps.smoothLines && (renderFlags & ShowSmoothLines) != 0)
+            glEnable(GL_LINE_SMOOTH);
+        else
+            glDisable(GL_LINE_SMOOTH);
+#endif
+        m_pipelineState.smoothLines = ps.smoothLines;
+    }
+}
+
+void Renderer::buildProjectionMatrix(Eigen::Matrix4f &mat, float nearZ, float farZ, float zoom) const
+{
+    mat = projectionMode->getProjectionMatrix(nearZ, farZ, zoom);
 }

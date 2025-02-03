@@ -7,20 +7,22 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <config.h>
 #include <algorithm>
-#include <celutil/debug.h>
-#include <celutil/stringutils.h>
-#include <celutil/util.h>
-#include <celengine/astro.h>
+
+#include <celastro/astro.h>
+#include <celengine/hash.h>
 #include <celengine/parser.h>
-#include <celengine/tokenizer.h>
+#include <celengine/value.h>
+#include <celutil/logger.h>
+#include <celutil/stringutils.h>
+#include <celutil/tokenizer.h>
 #include "destination.h"
 
-using namespace std;
+using celestia::util::GetLogger;
 
+namespace astro = celestia::astro;
 
-DestinationList* ReadDestinationList(istream& in)
+DestinationList* ReadDestinationList(std::istream& in)
 {
     Tokenizer tokenizer(&in);
     Parser parser(&tokenizer);
@@ -30,52 +32,63 @@ DestinationList* ReadDestinationList(istream& in)
     {
         if (tokenizer.getTokenType() != Tokenizer::TokenBeginGroup)
         {
-            DPRINTF(LOG_LEVEL_ERROR, "Error parsing destinations file.\n");
-            for_each(destinations->begin(), destinations->end(), deleteFunc<Destination*>());
+            GetLogger()->error("Error parsing destinations file.\n");
+            std::for_each(destinations->begin(), destinations->end(), [](Destination* dest) { delete dest; });
             delete destinations;
             return nullptr;
         }
         tokenizer.pushBack();
 
-        Value* destValue = parser.readValue();
-        if (destValue == nullptr || destValue->getType() != Value::HashType)
+        const Value destValue = parser.readValue();
+        const Hash* destParams = destValue.getHash();
+        if (destParams == nullptr)
         {
-            DPRINTF(LOG_LEVEL_ERROR, "Error parsing destination.\n");
-            for_each(destinations->begin(), destinations->end(), deleteFunc<Destination*>());
+            GetLogger()->error("Error parsing destination.\n");
+            std::for_each(destinations->begin(), destinations->end(), [](Destination* dest) { delete dest; });
             delete destinations;
-            if (destValue != nullptr)
-                delete destValue;
             return nullptr;
         }
 
-        Hash* destParams = destValue->getHash();
         Destination* dest = new Destination();
 
-        if (!destParams->getString("Name", dest->name))
+        if (const std::string* destName = destParams->getString("Name"); destName == nullptr)
         {
-            DPRINTF(LOG_LEVEL_INFO, "Skipping unnamed destination\n");
+            GetLogger()->warn("Skipping unnamed destination\n");
             delete dest;
         }
         else
         {
-            destParams->getString("Target", dest->target);
-            destParams->getString("Description", dest->description);
-            destParams->getNumber("Distance", dest->distance);
-
-            // Default unit of distance is the light year
-            string distanceUnits;
-            if (destParams->getString("DistanceUnits", distanceUnits))
+            dest->name = *destName;
+            if (const std::string* target = destParams->getString("Target"); target == nullptr)
             {
-                if (!compareIgnoringCase(distanceUnits, "km"))
-                    dest->distance = astro::kilometersToLightYears(dest->distance);
-                else if (!compareIgnoringCase(distanceUnits, "au"))
-                    dest->distance = astro::AUtoLightYears(dest->distance);
+                GetLogger()->warn("Skipping destination without target\n");
+                delete dest;
             }
-
-            destinations->push_back(dest);
+            else
+            {
+                dest->target = *target;
+                if (const std::string* description = destParams->getString("Description"); description != nullptr)
+                    dest->description = *description;
+                if (auto distance = destParams->getNumber<double>("Distance"); distance.has_value())
+                    dest->distance = *distance;
+                // Convert distance to goto distance of kilometers
+                // User default unit of distance is the light year
+                if (const std::string* distanceUnits = destParams->getString("DistanceUnits"); distanceUnits != nullptr)
+                {
+                    if (compareIgnoringCase(*distanceUnits, "ly") == 0)
+                        dest->distance = astro::lightYearsToKilometers(dest->distance);
+                    else if (compareIgnoringCase(*distanceUnits, "au") == 0)
+                        dest->distance = astro::AUtoKilometers(dest->distance);
+                    else if (compareIgnoringCase(*distanceUnits, "km") != 0)
+                        dest->distance = astro::lightYearsToKilometers(dest->distance);
+                }
+                else
+                {
+                    dest->distance = astro::lightYearsToKilometers(dest->distance);
+                }
+                destinations->push_back(dest);
+            }
         }
-
-        delete destValue;
     }
 
     return destinations;

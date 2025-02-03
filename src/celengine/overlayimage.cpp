@@ -1,19 +1,16 @@
 #include <algorithm>
-#include <iostream>
 #include <celmath/mathlib.h>
 #include "overlayimage.h"
 #include "rectangle.h"
 #include "render.h"
 
-using namespace celmath;
-
 OverlayImage::OverlayImage(fs::path f, Renderer *r) :
     filename(std::move(f)),
     renderer(r)
 {
-    texture = std::unique_ptr<Texture>(LoadTextureFromFile(fs::path("images") / filename,
-                                                           Texture::EdgeClamp,
-                                                           Texture::NoMipMaps));
+    texture = LoadTextureFromFile(fs::path("images") / filename,
+                                  Texture::EdgeClamp,
+                                  Texture::NoMipMaps);
 }
 
 void OverlayImage::setColor(const Color& c)
@@ -53,7 +50,7 @@ void OverlayImage::render(float curr_time, int width, int height)
     float alpha = 1.0f;
     if (curr_time > start + fadeafter)
     {
-        alpha = clamp(start + duration - curr_time);
+        alpha = std::clamp(start + duration - curr_time, 0.0f, 1.0f);
     }
 
     celestia::Rect r(left, bottom, xSize, ySize);
@@ -62,6 +59,6 @@ void OverlayImage::render(float curr_time, int width, int height)
     {
         r.colors[i] = Color(colors[i], colors[i].alpha() * alpha);
     }
-    r.nColors = 4;
-    renderer->drawRectangle(r, ShaderProperties::FisheyeOverrideModeDisabled, renderer->getOrthoProjectionMatrix());
+    r.hasColors = true;
+    renderer->drawRectangle(r, FisheyeOverrideMode::Disabled, renderer->getOrthoProjectionMatrix());
 }

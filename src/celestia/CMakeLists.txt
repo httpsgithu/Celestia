@@ -1,4 +1,5 @@
 set(CELESTIA_SOURCES
+  catalogloader.h
   celestiacore.cpp
   celestiacore.h
   celestiastate.cpp
@@ -13,19 +14,75 @@ set(CELESTIA_SOURCES
   favorites.h
   helper.cpp
   helper.h
+  hud.cpp
+  hud.h
+  loaddso.cpp
+  loaddso.h
+  loadsso.cpp
+  loadsso.h
+  loadstars.cpp
+  loadstars.h
+  moviecapture.h
   scriptmenu.cpp
   scriptmenu.h
+  textinput.cpp
+  textinput.h
+  textprintposition.cpp
+  textprintposition.h
+  timeinfo.h
   url.cpp
   url.h
   view.cpp
   view.h
+  viewmanager.cpp
+  viewmanager.h
+  windowmetrics.cpp
+  windowmetrics.h
 )
 
 if(ENABLE_FFMPEG)
   list(APPEND CELESTIA_SOURCES
-    moviecapture.cpp
-    moviecapture.h
+    ffmpegcapture.cpp
+    ffmpegcapture.h
   )
+endif()
+
+if(ENABLE_MINIAUDIO)
+  list(APPEND CELESTIA_SOURCES
+    audiosession.cpp
+    audiosession.h
+    miniaudiosession.h
+  )
+
+  set(MINIAUDIO_SOURCES
+    miniaudiosession.cpp
+  )
+
+  # Files including miniaudio needs to treated as Objective-C++
+  # on Apple platforms
+  if(APPLE)
+    set_property(SOURCE ${MINIAUDIO_SOURCES}
+      APPEND_STRING PROPERTY COMPILE_FLAGS "-x objective-c++")
+  endif()
+
+  list(APPEND CELESTIA_SOURCES
+    ${MINIAUDIO_SOURCES}
+  )
+endif()
+
+set(CELESTIA_CORE_LIBS $<TARGET_OBJECTS:cel3ds>
+                       $<TARGET_OBJECTS:celastro>
+                       $<TARGET_OBJECTS:celengine>
+                       $<TARGET_OBJECTS:celephem>
+                       $<TARGET_OBJECTS:celimage>
+                       $<TARGET_OBJECTS:celmath>
+                       $<TARGET_OBJECTS:celmodel>
+                       $<TARGET_OBJECTS:celrender>
+                       $<TARGET_OBJECTS:celttf>
+                       $<TARGET_OBJECTS:celutil>
+)
+if(TARGET celcompat)
+  set(CELESTIA_CORE_LIBS ${CELESTIA_CORE_LIBS} $<TARGET_OBJECTS:celcompat>)
 endif()
 
 set(SCRIPT_LIBS $<TARGET_OBJECTS:celcommonscript> $<TARGET_OBJECTS:cellegacyscript>)
@@ -40,15 +97,7 @@ set(CELSO "celestia-${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
 
 add_library(celestia SHARED ${CELESTIA_SOURCES}
                             ${SCRIPT_LIBS}
-                            $<TARGET_OBJECTS:cel3ds>
-                            $<TARGET_OBJECTS:celcompat>
-                            $<TARGET_OBJECTS:celengine>
-                            $<TARGET_OBJECTS:celephem>
-                            $<TARGET_OBJECTS:celimage>
-                            $<TARGET_OBJECTS:celmath>
-                            $<TARGET_OBJECTS:celmodel>
-                            $<TARGET_OBJECTS:celttf>
-                            $<TARGET_OBJECTS:celutil>
+                            ${CELESTIA_CORE_LIBS}
 )
 
 set_target_properties(celestia PROPERTIES
@@ -69,10 +118,34 @@ if(ENABLE_FFMPEG)
   target_link_libraries(celestia ${FFMPEG_LIBRARIES})
 endif()
 
-install(TARGETS celestia LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} NAMELINK_SKIP)
+if(HAVE_MESHOPTIMIZER)
+  target_link_libraries(celestia meshoptimizer::meshoptimizer)
+endif()
 
-add_subdirectory(glut)
+if(ENABLE_LTO)
+  set_target_properties(celestia PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
+
+if(WIN32)
+  install(
+    TARGETS celestia
+    RUNTIME_DEPENDENCIES
+      PRE_EXCLUDE_REGEXES "^api-ms" "^ext-ms-"
+      POST_EXCLUDE_REGEXES ".*system32/.*\\.dll$"
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT core
+  )
+else()
+  install(
+    TARGETS celestia
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    NAMELINK_SKIP
+    COMPONENT core
+  )
+endif()
+
 add_subdirectory(gtk)
-add_subdirectory(qt)
+add_subdirectory(qt5)
+add_subdirectory(qt6)
 add_subdirectory(sdl)
 add_subdirectory(win32)

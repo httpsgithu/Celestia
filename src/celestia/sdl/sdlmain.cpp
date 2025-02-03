@@ -1,23 +1,43 @@
-//#define GL_ES
+// sdlmain.cpp
+//
+// Copyright (C) 2020-present, the Celestia Development Team
+//
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU General Public License
+// as published by the Free Software Foundation; either version 2
+// of the License, or (at your option) any later version.
+
 #include <cctype>
+#include <cstdio>
 #include <cstring>
-#include <iostream>
 #include <memory>
-#include <fmt/printf.h>
+#include <string_view>
+#include <system_error>
+#include <fmt/format.h>
+#include <celcompat/filesystem.h>
 #include <celengine/glsupport.h>
+#include <celestia/celestiacore.h>
+#include <celestia/configfile.h>
+#include <celestia/url.h>
 #include <celutil/gettext.h>
-#include <celutil/util.h>
+#include <celutil/localeutil.h>
+#include <celutil/tzutil.h>
 #include <SDL.h>
 #ifdef GL_ES
 #include <SDL_opengles2.h>
 #else
 #include <SDL_opengl.h>
 #endif
-#include <unistd.h>
-#include <celestia/celestiacore.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
-namespace celestia
+namespace celestia::sdl
 {
+
+namespace
+{
+
 class SDL_Alerter : public CelestiaCore::Alerter
 {
     SDL_Window* window { nullptr };
@@ -36,7 +56,7 @@ class SDL_Application
 {
  public:
     SDL_Application() = delete;
-    SDL_Application(const std::string name, int w, int h) :
+    SDL_Application(std::string_view name, int w, int h) :
         m_appName       { name },
         m_windowWidth   { w },
         m_windowHeight  { h }
@@ -44,13 +64,30 @@ class SDL_Application
     }
     ~SDL_Application();
 
-    static std::shared_ptr<SDL_Application> init(const std::string, int, int);
+    enum class EventHandleResult
+    {
+        Handled,
+        Ignored,
+        NoNewEvent,
+        Quit,
+    };
+
+    enum class RunLoopState
+    {
+        Normal,
+        Quit,
+    };
+
+    static std::shared_ptr<SDL_Application> init(std::string_view, int, int);
 
     bool createOpenGLWindow();
 
     bool initCelestiaCore();
     void run();
-    const char* getError() const;
+    EventHandleResult handleEvent();
+    RunLoopState update();
+    std::string_view getError() const;
+    float getScalingFactor() const;
 
  private:
     void display();
@@ -67,6 +104,9 @@ class SDL_Application
 
     // aux functions
     void toggleFullscreen();
+    void copyURL();
+    void pasteURL();
+    void configure() const;
 
     // state variables
     std::string m_appName;
@@ -84,7 +124,7 @@ class SDL_Application
 };
 
 std::shared_ptr<SDL_Application>
-SDL_Application::init(const std::string name, int w, int h)
+SDL_Application::init(std::string_view name, int w, int h)
 {
     if (SDL_Init(SDL_INIT_VIDEO) < 0)
         return nullptr;
@@ -96,7 +136,7 @@ SDL_Application::init(const std::string name, int w, int h)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #endif
-    return std::shared_ptr<SDL_Application>(new SDL_Application(std::move(name), w, h));
+    return std::make_shared<SDL_Application>(name, w, h);
 }
 
 SDL_Application::~SDL_Application()
@@ -118,7 +158,7 @@ SDL_Application::createOpenGLWindow()
                                     SDL_WINDOWPOS_CENTERED,
                                     m_windowWidth,
                                     m_windowHeight,
-                                    SDL_WINDOW_OPENGL|SDL_WINDOW_SHOWN|SDL_WINDOW_RESIZABLE);
+                                    SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (m_mainWindow == nullptr)
         return false;
 
@@ -132,10 +172,16 @@ SDL_Application::createOpenGLWindow()
     return true;
 }
 
-const char*
+std::string_view
 SDL_Application::getError() const
 {
     return SDL_GetError();
+}
+
+float
+SDL_Application::getScalingFactor() const
+{
+    return static_cast<float>(m_appCore->getScreenDpi()) / 96.0f;
 }
 
 void
@@ -150,15 +196,79 @@ SDL_Application::initCelestiaCore()
 {
     m_appCore = new CelestiaCore();
     m_appCore->setAlerter(new SDL_Alerter());
-    bool ret = m_appCore->initSimulation();
-    return ret;
+    if (!m_appCore->initSimulation())
+        return false;
+    if (float screenDpi = 96.0f; SDL_GetDisplayDPI(0, &screenDpi, nullptr, nullptr) == 0)
+        m_appCore->setScreenDpi(static_cast<int>(screenDpi));
+    return true;
 }
+
+void
+SDL_Application::configure() const
+{
+    auto *renderer     = m_appCore->getRenderer();
+    const auto *config = m_appCore->getConfig();
+
+    renderer->setRenderFlags(Renderer::DefaultRenderFlags);
+    renderer->setShadowMapSize(config->renderDetails.ShadowMapSize);
+    renderer->setSolarSystemMaxDistance(config->renderDetails.SolarSystemMaxDistance);
+}
+
+SDL_Application::EventHandleResult
+SDL_Application::handleEvent()
+{
+    SDL_Event event;
+    if (SDL_PollEvent(&event) == 0)
+        return EventHandleResult::NoNewEvent;
+
+    switch (event.type)
+    {
+    case SDL_QUIT:
+        return EventHandleResult::Quit;
+    case SDL_TEXTINPUT:
+        handleTextInputEvent(event.text);
+        break;
+    case SDL_KEYDOWN:
+        handleKeyPressEvent(event.key);
+        break;
+    case SDL_KEYUP:
+        handleKeyReleaseEvent(event.key);
+        break;
+    case SDL_MOUSEBUTTONDOWN:
+        handleMousePressEvent(event.button);
+        break;
+    case SDL_MOUSEBUTTONUP:
+        handleMouseReleaseEvent(event.button);
+        break;
+    case SDL_MOUSEWHEEL:
+        handleMouseWheelEvent(event.wheel);
+        break;
+    case SDL_MOUSEMOTION:
+        handleMouseMotionEvent(event.motion);
+        break;
+    case SDL_WINDOWEVENT:
+        handleWindowEvent(event.window);
+        break;
+    default:
+        return EventHandleResult::Ignored;
+    }
+    return EventHandleResult::Handled;
+}
+
+#ifdef __EMSCRIPTEN__
+static void mainRunLoopHandler(void *arg)
+{
+    auto app = reinterpret_cast<SDL_Application *>(arg);
+    if (app->update() == SDL_Application::RunLoopState::Quit)
+        emscripten_cancel_main_loop();
+}
+#endif
 
 void
 SDL_Application::run()
 {
     m_appCore->initRenderer();
-    m_appCore->getRenderer()->setRenderFlags(Renderer::DefaultRenderFlags);
+    configure();
     m_appCore->start();
 
     std::string tzName;
@@ -168,55 +278,41 @@ SDL_Application::run()
         m_appCore->setTimeZoneName(tzName);
         m_appCore->setTimeZoneBias(dstBias);
     }
+    SDL_GL_GetDrawableSize(m_mainWindow, &m_windowWidth, &m_windowHeight);
     m_appCore->resize(m_windowWidth, m_windowHeight);
 
     SDL_StartTextInput();
 
-    bool quit = false;
-    while (!quit)
-    {
-        SDL_Event event;
-        while (SDL_PollEvent(&event) != 0)
-        {
-            switch (event.type)
-            {
-            case SDL_QUIT:
-                quit = true;
-                break;
-            case SDL_TEXTINPUT:
-                handleTextInputEvent(event.text);
-                break;
-            case SDL_KEYDOWN:
-                handleKeyPressEvent(event.key);
-                break;
-            case SDL_KEYUP:
-                handleKeyReleaseEvent(event.key);
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                handleMousePressEvent(event.button);
-                break;
-            case SDL_MOUSEBUTTONUP:
-                handleMouseReleaseEvent(event.button);
-                break;
-            case SDL_MOUSEWHEEL:
-                handleMouseWheelEvent(event.wheel);
-                break;
-            case SDL_MOUSEMOTION:
-                handleMouseMotionEvent(event.motion);
-                break;
-            case SDL_WINDOWEVENT:
-                handleWindowEvent(event.window);
-                break;
-            default:
-                break;
-            }
-        }
-        m_appCore->tick();
-        display();
-    }
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop_arg(mainRunLoopHandler, this, 0, 1);
+#else
+    while (update() != RunLoopState::Quit);
+#endif
 }
 
-static int
+SDL_Application::RunLoopState
+SDL_Application::update()
+{
+    bool stop = false;
+    while (!stop)
+    {
+        auto result = handleEvent();
+        switch (result)
+        {
+        case EventHandleResult::Quit:
+            return RunLoopState::Quit;
+        case EventHandleResult::NoNewEvent:
+            stop = true;
+        default:
+            break;
+        }
+    }
+    m_appCore->tick();
+    display();
+    return RunLoopState::Normal;
+}
+
+int
 toCelestiaKey(SDL_Keycode key)
 {
     switch (key)
@@ -291,14 +387,24 @@ SDL_Application::handleKeyPressEvent(const SDL_KeyboardEvent &event)
     int mod = 0;
     if ((event.keysym.mod & KMOD_CTRL) != 0)
     {
-        int k = tolower(key);
-        if (k >= 'a' && k <= 'z')
+        mod |= CelestiaCore::ControlKey;
+
+        if (int k = std::tolower(key); k >= 'a' && k <= 'z')
         {
-            key = k + 1 - 'a';
-            m_appCore->charEntered(key, mod);
+            switch (k)
+            {
+            case 'c':
+                copyURL();
+                break;
+            case 'v':
+                pasteURL();
+                break;
+            default:
+                key = k + 1 - 'a';
+                m_appCore->charEntered(key, mod);
+            }
             return;
         }
-        mod |= CelestiaCore::ControlKey;
     }
     if ((event.keysym.mod & KMOD_SHIFT) != 0)
         mod |= CelestiaCore::ShiftKey;
@@ -341,7 +447,7 @@ SDL_Application::handleTextInputEvent(const SDL_TextInputEvent &event)
     m_appCore->charEntered(event.text, 0);
 }
 
-static int
+int
 toCelestiaButton(int button)
 {
     switch (button)
@@ -366,7 +472,8 @@ SDL_Application::handleMousePressEvent(const SDL_MouseButtonEvent &event)
 
     m_lastX = event.x;
     m_lastY = event.y;
-    m_appCore->mouseButtonDown(event.x, event.y, button);
+    float scaling = getScalingFactor();
+    m_appCore->mouseButtonDown(static_cast<float>(event.x) * scaling, static_cast<float>(event.y) * scaling, button);
 }
 
 void
@@ -382,21 +489,26 @@ SDL_Application::handleMouseReleaseEvent(const SDL_MouseButtonEvent &event)
         {
             SDL_ShowCursor(SDL_ENABLE);
             m_cursorVisible = true;
+#ifndef __EMSCRIPTEN__
+            // Mouse warping is not supported in browser
             SDL_WarpMouseInWindow(m_mainWindow, m_lastX, m_lastY);
+#endif
         }
     }
     m_lastX = event.x;
     m_lastY = event.y;
-    m_appCore->mouseButtonUp(event.x, event.y, button);
+    float scaling = getScalingFactor();
+    m_appCore->mouseButtonUp(static_cast<float>(event.x) * scaling, static_cast<float>(event.y) * scaling, button);
 }
 
 void
 SDL_Application::handleMouseWheelEvent(const SDL_MouseWheelEvent &event)
 {
+    float scaling = getScalingFactor();
     if (event.y > 0) // scroll up
-        m_appCore->mouseWheel(-1.0f, 0);
+        m_appCore->mouseWheel(-scaling, 0);
     else if (event.y < 0) // scroll down
-        m_appCore->mouseWheel(1.0f, 0);
+        m_appCore->mouseWheel(scaling, 0);
 }
 
 void
@@ -419,8 +531,17 @@ SDL_Application::handleMouseMotionEvent(const SDL_MouseMotionEvent &event)
             m_lastX = event.x;
             m_lastY = event.y;
         }
-        m_appCore->mouseMove(x, y, buttons);
+
+        float scaling = getScalingFactor();
+        m_appCore->mouseMove(static_cast<float>(x) * scaling, static_cast<float>(y) * scaling, buttons);
+
+#ifdef __EMSCRIPTEN__
+        // Mouse warping is not supported in browser
+        m_lastX = event.x;
+        m_lastY = event.y;
+#else
         SDL_WarpMouseInWindow(m_mainWindow, m_lastX, m_lastY);
+#endif
     }
 }
 
@@ -430,8 +551,7 @@ SDL_Application::handleWindowEvent(const SDL_WindowEvent &event)
     switch (event.event)
     {
     case SDL_WINDOWEVENT_RESIZED:
-        m_windowWidth  = event.data1;
-        m_windowHeight = event.data2;
+        SDL_GL_GetDrawableSize(m_mainWindow, &m_windowWidth, &m_windowHeight);
         m_appCore->resize(m_windowWidth, m_windowHeight);
         break;
     default:
@@ -465,68 +585,106 @@ SDL_Application::toggleFullscreen()
         // First try to activate real fullscreen mode
         ret = SDL_SetWindowFullscreen(m_mainWindow, SDL_WINDOW_FULLSCREEN);
         // Then try to emulate fulscreen resizing to the desktop size
-        if (ret == 0)
+        if (ret < 0)
             ret = SDL_SetWindowFullscreen(m_mainWindow, SDL_WINDOW_FULLSCREEN_DESKTOP);
         if (ret == 0)
             m_fullscreen = true;
     }
 }
+
+void
+SDL_Application::copyURL()
+{
+    CelestiaState appState(m_appCore);
+    appState.captureState();
+
+    if (SDL_SetClipboardText(Url(appState).getAsString().c_str()) == 0)
+        m_appCore->flash(_("Copied URL"));
 }
 
 void
-FatalError(const std::string &message)
+SDL_Application::pasteURL()
 {
+    if (SDL_HasClipboardText() != SDL_TRUE)
+        return;
+
+    // on error SDL_GetClipboardText returns a new empty string
+    char *str = SDL_GetClipboardText(); // don't add const due to SDL_free
+    if (*str != '\0' && m_appCore->goToUrl(str))
+        m_appCore->flash(_("Pasting URL"));
+
+    SDL_free(str);
+}
+
+void
+FatalErrorImpl(fmt::string_view format, fmt::format_args args)
+{
+    auto message = fmt::vformat(format, args);
     int ret = SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
                                        "Fatal Error",
                                        message.c_str(),
                                        nullptr);
     if (ret < 0)
-        std::cerr << message << std::endl;
+        fmt::print(stderr, "{}\n", message);
 }
 
-void DumpGLInfo()
+template <typename... Args>
+void
+FatalError(const char *format, const Args&... args)
+{
+    FatalErrorImpl(fmt::string_view(format), fmt::make_format_args(args...));
+}
+
+void
+DumpGLInfo()
 {
     const char* s;
     s = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     if (s != nullptr)
-        std::cout << s << '\n';
+        fmt::print("GL Version: {}\n", s);
 
     s = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
     if (s != nullptr)
-        std::cout << s << '\n';
+        fmt::print("GL Vendor: {}\n", s);
 
     s = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     if (s != nullptr)
-        std::cout << s << '\n';
+        fmt::print("GL Renderer: {}\n", s);
 
     s = reinterpret_cast<const char*>(glGetString(GL_SHADING_LANGUAGE_VERSION));
     if (s != nullptr)
-        std::cout << s << '\n';
+        fmt::print("GLSL Version: {}\n", s);
 }
 
-
-using namespace celestia;
-
-int main(int argc, char **argv)
+int
+sdlmain(int /* argc */, char ** /* argv */)
 {
-    setlocale(LC_ALL, "");
-    setlocale(LC_NUMERIC, "C");
-    bindtextdomain(PACKAGE, LOCALEDIR);
-    bind_textdomain_codeset(PACKAGE, "UTF-8");
-    textdomain(PACKAGE);
+    CelestiaCore::initLocale();
 
-    if (chdir(CONFIG_DATA_DIR) == -1)
+#ifdef ENABLE_NLS
+    bindtextdomain("celestia", LOCALEDIR);
+    bind_textdomain_codeset("celestia", "UTF-8");
+    bindtextdomain("celestia-data", LOCALEDIR);
+    bind_textdomain_codeset("celestia-data", "UTF-8");
+    textdomain("celestia");
+#endif
+
+    const char *dataDir = getenv("CELESTIA_DATA_DIR");
+    if (dataDir == nullptr)
+        dataDir = CONFIG_DATA_DIR;
+
+    std::error_code ec;
+    fs::current_path(dataDir, ec);
+    if (ec)
     {
-        FatalError(fmt::sprintf("Cannot chdir to '%s', probably due to improper installation",
-                   CONFIG_DATA_DIR));
+        FatalError("Cannot chdir to {}, probably due to improper installation", dataDir);
         return 1;
     }
 
     auto app = SDL_Application::init("Celestia", 640, 480);
     if (app == nullptr)
     {
-        FatalError(fmt::sprintf("Could not initialize SDL! Error: %s",
-                   app->getError()));
+        FatalError("Could not initialize SDL! Error: {}", SDL_GetError());
         return 2;
     }
 
@@ -537,8 +695,7 @@ int main(int argc, char **argv)
     }
     if (!app->createOpenGLWindow())
     {
-        FatalError(fmt::sprintf("Could not create a OpenGL window! Error: %s",
-                   app->getError()));
+        FatalError("Could not create a OpenGL window! Error: {}", app->getError());
         return 4;
     }
 
@@ -556,4 +713,14 @@ int main(int argc, char **argv)
     app->run();
 
     return 0;
+}
+
+} // end unnamed namespace
+
+} // end namespace celestia::sdl
+
+int
+main(int argc, char **argv)
+{
+    return celestia::sdl::sdlmain(argc, argv);
 }

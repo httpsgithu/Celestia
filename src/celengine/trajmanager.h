@@ -7,63 +7,75 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef CELENGINE_TRAJMANAGER_H_
-#define CELENGINE_TRAJMANAGER_H_
+#pragma once
 
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <unordered_map>
+
+#include <celcompat/filesystem.h>
 #include <celephem/orbit.h>
 #include <celephem/samporbit.h>
-#include <string>
-#include <map>
-#include <celutil/resmanager.h>
 
-
-class TrajectoryInfo : public ResourceInfo<Orbit>
+namespace celestia::engine
 {
- public:
-    std::string source;
-    fs::path path;
-    TrajectoryInterpolation interpolation;
-    TrajectoryPrecision precision;
 
-    TrajectoryInfo(const std::string& _source,
-                   const fs::path& _path = "",
-                   TrajectoryInterpolation _interpolation = TrajectoryInterpolationCubic,
-                   TrajectoryPrecision _precision = TrajectoryPrecisionSingle) :
-        source(_source), path(_path), interpolation(_interpolation), precision(_precision) {};
+class TrajectoryManager
+{
+public:
+    TrajectoryManager() = default;
+    ~TrajectoryManager() = default;
 
-    fs::path resolve(const fs::path&) override;
-    Orbit* load(const fs::path&) override;
+    TrajectoryManager(const TrajectoryManager&) = delete;
+    TrajectoryManager& operator=(const TrajectoryManager&) = delete;
+
+    std::shared_ptr<const ephem::Orbit> find(const fs::path& source,
+                                             const fs::path& path,
+                                             ephem::TrajectoryInterpolation interpolation,
+                                             ephem::TrajectoryPrecision precision);
+
+private:
+    struct Key
+    {
+        fs::path path;
+        ephem::TrajectoryInterpolation interpolation;
+        ephem::TrajectoryPrecision precision;
+
+        friend bool operator==(const Key& lhs, const Key& rhs) noexcept
+        {
+            return lhs.path == rhs.path && lhs.interpolation == rhs.interpolation && lhs.precision == rhs.precision;
+        }
+
+        friend bool operator!=(const Key& lhs, const Key& rhs) noexcept
+        {
+            return !(lhs == rhs);
+        }
+    };
+
+    struct KeyHasher
+    {
+        std::size_t operator()(const Key& key) const noexcept
+        {
+            // Only support 32-bit and 64-bit size_t for now
+            static_assert(sizeof(std::size_t) == sizeof(std::uint32_t) || sizeof(std::size_t) == sizeof(std::uint64_t));
+
+            // Based on documentation of boost::hash_combine
+            // Prevent Sonar complaining about platform-dependent casts that happen to be redundant on the system it runs on
+            constexpr std::size_t phi = sizeof(std::size_t) == sizeof(std::uint32_t)
+                ? static_cast<std::size_t>(0x9e3779b9) //NOSONAR
+                : static_cast<std::size_t>(0x9e3779b97f4a7c15); //NOSONAR
+
+            auto seed = fs::hash_value(key.path);
+            seed ^= std::hash<ephem::TrajectoryInterpolation>{}(key.interpolation) + phi + (seed << 6) + (seed >> 2);
+            seed ^= std::hash<ephem::TrajectoryPrecision>{}(key.precision) + phi + (seed << 6) + (seed >> 2);
+            return seed;
+        }
+    };
+
+    std::unordered_map<Key, std::weak_ptr<const ephem::Orbit>, KeyHasher> orbits;
 };
 
-// Sort trajectory info records. The same trajectory can be loaded multiple times with
-// different attributes for precision and interpolation. How the ordering is defined isn't
-// as important making this operator distinguish between trajectories with either different
-// sources or different attributes.
-inline bool operator<(const TrajectoryInfo& ti0, const TrajectoryInfo& ti1)
-{
-    if (ti0.interpolation == ti1.interpolation)
-    {
-        if (ti0.precision == ti1.precision)
-        {
-            if (ti0.source == ti1.source)
-                return ti0.path < ti1.path;
-            else
-                return ti0.source < ti1.source;
-        }
-        else
-        {
-            return ti0.precision < ti1.precision;
-        }
-    }
-    else
-    {
-        return ti0.interpolation < ti1.interpolation;
-    }
-}
+TrajectoryManager* GetTrajectoryManager();
 
-typedef ResourceManager<TrajectoryInfo> TrajectoryManager;
-
-extern TrajectoryManager* GetTrajectoryManager();
-
-#endif // CELENGINE_TRAJMANAGER_H_
-
+} // end namespace celestia::engine

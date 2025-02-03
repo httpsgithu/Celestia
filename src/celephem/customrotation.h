@@ -10,14 +10,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_CUSTOMROTATION_H_
-#define _CELENGINE_CUSTOMROTATION_H_
+#pragma once
 
-#include <string>
+#include <memory>
+#include <string_view>
+
+namespace celestia::ephem
+{
 
 class RotationModel;
 
-RotationModel* GetCustomRotationModel(const std::string& name);
+std::shared_ptr<const RotationModel>
+GetCustomRotationModel(std::string_view name);
 
-#endif // _CELENGINE_CUSTOMROTATION_H_
-
+}

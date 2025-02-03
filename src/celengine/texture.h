@@ -1,5 +1,6 @@
 // texture.h
 //
+// Copyright (C) 2003-present, Celestia Development Team
 // Copyright (C) 2001-2003, Chris Laurel
 //
 // This program is free software; you can redistribute it and/or
@@ -7,16 +8,18 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_TEXTURE_H_
-#define _CELENGINE_TEXTURE_H_
+#pragma once
 
+#include <cstdint>
+#include <memory>
 #include <string>
-#include <celutil/color.h>
+
 #include <celcompat/filesystem.h>
-#include <celengine/image.h>
+#include <celimage/image.h>
+#include <celutil/array_view.h>
+#include <celutil/color.h>
 
-
-typedef void (*ProceduralTexEval)(float, float, float, unsigned char*);
+typedef void (*ProceduralTexEval)(float, float, float, std::uint8_t*);
 
 
 struct TextureTile
@@ -37,10 +40,10 @@ struct TextureTile
 class TexelFunctionObject
 {
  public:
-    TexelFunctionObject() {};
-    virtual ~TexelFunctionObject() {};
+    TexelFunctionObject() = default;
+    virtual ~TexelFunctionObject() = default;
     virtual void operator()(float u, float v, float w,
-                            unsigned char* pixel) = 0;
+                            std::uint8_t* pixel) = 0;
 };
 
 
@@ -50,7 +53,7 @@ class Texture
     Texture(int w, int h, int d = 1);
     virtual ~Texture() = default;
 
-    virtual const TextureTile getTile(int lod, int u, int v) = 0;
+    virtual TextureTile getTile(int lod, int u, int v) = 0;
     virtual void bind() = 0;
 
     virtual int getLODCount() const;
@@ -94,12 +97,19 @@ class Texture
     {
         DefaultMipMaps = 0,
         NoMipMaps      = 1,
-        AutoMipMaps    = 2,
     };
 
     // Format option flags
-    enum {
+    enum
+    {
         DXT5NormalMap = 1
+    };
+
+    enum Colorspace
+    {
+        DefaultColorspace = 0,
+        LinearColorspace  = 1,
+        sRGBColorspace    = 2
     };
 
  protected:
@@ -118,12 +128,12 @@ class Texture
 class ImageTexture : public Texture
 {
  public:
-    ImageTexture(Image& img, AddressMode, MipMapMode);
+    ImageTexture(const celestia::engine::Image& img, AddressMode, MipMapMode);
     ~ImageTexture();
 
-    virtual const TextureTile getTile(int lod, int u, int v);
-    virtual void bind();
-    virtual void setBorderColor(Color);
+    TextureTile getTile(int lod, int u, int v) override;
+    void bind() override;
+    void setBorderColor(Color) override;
 
     unsigned int getName() const;
 
@@ -135,15 +145,15 @@ class ImageTexture : public Texture
 class TiledTexture : public Texture
 {
  public:
-    TiledTexture(Image& img, int _uSplit, int _vSplit, MipMapMode);
+    TiledTexture(const celestia::engine::Image& img, int _uSplit, int _vSplit, MipMapMode);
     ~TiledTexture();
 
-    virtual const TextureTile getTile(int lod, int u, int v);
-    virtual void bind();
-    virtual void setBorderColor(Color);
+    TextureTile getTile(int lod, int u, int v) override;
+    void bind() override;
+    void setBorderColor(Color) override;
 
-    virtual int getUTileCount(int lod) const;
-    virtual int getVTileCount(int lod) const;
+    int getUTileCount(int lod) const override;
+    int getVTileCount(int lod) const override;
 
  private:
     int uSplit;
@@ -155,38 +165,43 @@ class TiledTexture : public Texture
 class CubeMap : public Texture
 {
  public:
-    CubeMap(Image* faces[]);
+    explicit CubeMap(celestia::util::array_view<const celestia::engine::Image*>);
     ~CubeMap();
 
-    virtual const TextureTile getTile(int lod, int u, int v);
-    virtual void bind();
-    virtual void setBorderColor(Color);
+    TextureTile getTile(int lod, int u, int v) override;
+    void bind() override;
+    void setBorderColor(Color) override;
 
  private:
     unsigned int glName;
 };
 
 
-extern Texture* CreateProceduralTexture(int width, int height,
-                                        celestia::PixelFormat format,
-                                        ProceduralTexEval func,
-                                        Texture::AddressMode addressMode = Texture::EdgeClamp,
-                                        Texture::MipMapMode mipMode = Texture::DefaultMipMaps);
-extern Texture* CreateProceduralTexture(int width, int height,
-                                        celestia::PixelFormat format,
-                                        TexelFunctionObject& func,
-                                        Texture::AddressMode addressMode = Texture::EdgeClamp,
-                                        Texture::MipMapMode mipMode = Texture::DefaultMipMaps);
-extern Texture* CreateProceduralCubeMap(int size, celestia::PixelFormat format,
-                                        ProceduralTexEval func);
+std::unique_ptr<Texture>
+CreateProceduralTexture(int width, int height,
+                        celestia::engine::PixelFormat format,
+                        ProceduralTexEval func,
+                        Texture::AddressMode addressMode = Texture::EdgeClamp,
+                        Texture::MipMapMode mipMode = Texture::DefaultMipMaps);
 
-extern Texture* LoadTextureFromFile(const fs::path& filename,
-                                    Texture::AddressMode addressMode = Texture::EdgeClamp,
-                                    Texture::MipMapMode mipMode = Texture::DefaultMipMaps);
+std::unique_ptr<Texture>
+CreateProceduralTexture(int width, int height,
+                        celestia::engine::PixelFormat format,
+                        TexelFunctionObject& func,
+                        Texture::AddressMode addressMode = Texture::EdgeClamp,
+                        Texture::MipMapMode mipMode = Texture::DefaultMipMaps);
 
-extern Texture* LoadHeightMapFromFile(const fs::path& filename,
-                                      float height,
-                                      Texture::AddressMode addressMode = Texture::EdgeClamp);
+std::unique_ptr<Texture>
+CreateProceduralCubeMap(int size, celestia::engine::PixelFormat format,
+                        ProceduralTexEval func);
 
+std::unique_ptr<Texture>
+LoadTextureFromFile(const fs::path& filename,
+                    Texture::AddressMode addressMode = Texture::EdgeClamp,
+                    Texture::MipMapMode mipMode = Texture::DefaultMipMaps,
+                    Texture::Colorspace colorspace = Texture::DefaultColorspace);
 
-#endif // _CELENGINE_TEXTURE_H_
+std::unique_ptr<Texture>
+LoadHeightMapFromFile(const fs::path& filename,
+                      float height,
+                      Texture::AddressMode addressMode = Texture::EdgeClamp);

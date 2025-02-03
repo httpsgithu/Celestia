@@ -11,10 +11,12 @@
 
 #pragma once
 
-#include <iostream>
+#include <iosfwd>
 #include <string>
 #include <vector>
+
 #include <lua.hpp>
+
 #include <celcompat/filesystem.h>
 #include <celutil/timer.h>
 #include <celengine/observer.h>
@@ -28,7 +30,11 @@ int lua_isinteger(lua_State *L, int index);
 #endif
 
 class CelestiaCore;
+
+namespace celestia
+{
 class View;
+}
 
 class LuaState
 {
@@ -73,11 +79,12 @@ public:
     bool callLuaHook(void* obj, const char* method, float x, float y, int b);
     bool callLuaHook(void* obj, const char* method, double dt);
 
-    enum IOMode {
-        NoIO = 1,
-        Asking = 2,
-        IOAllowed = 4,
-        IODenied = 8
+    enum class IOMode
+    {
+        NotDetermined  = 1,
+        Asking         = 2,
+        Allowed        = 4,
+        Denied         = 8
     };
 
 private:
@@ -86,9 +93,9 @@ private:
     bool alive{ false };
     Timer* timer;
     double scriptAwakenTime{ 0.0 };
-    IOMode ioMode{ NoIO };
+    IOMode ioMode{ IOMode::NotDetermined };
     bool eventHandlerEnabled{ false };
 };
 
-View* getViewByObserver(CelestiaCore*, Observer*);
-void getObservers(CelestiaCore*, std::vector<Observer*>&);
+celestia::View* getViewByObserver(const CelestiaCore*, const Observer*);
+void getObservers(const CelestiaCore*, std::vector<Observer*>&);

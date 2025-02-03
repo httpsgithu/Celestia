@@ -7,27 +7,24 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELMATH_SPHERE_H_
-#define _CELMATH_SPHERE_H_
+#pragma once
 
 #include <Eigen/Core>
 
-namespace celmath
+namespace celestia::math
 {
 
 template<class T> class Sphere
 {
  public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     Sphere() :
-        center(0, 0, 0),
-        radius(1)
+        center(Eigen::Matrix<T, 3, 1>::Zero()),
+        radius(static_cast<T>(1))
     {
     }
 
     Sphere(T _radius) :
-        center(0, 0, 0),
+        center(Eigen::Matrix<T, 3, 1>::Zero()),
         radius(_radius)
     {
     }
@@ -43,9 +40,6 @@ template<class T> class Sphere
     T radius;
 };
 
-typedef Sphere<float>   Spheref;
-typedef Sphere<double>  Sphered;
-
-} // namespace celmath
-
-#endif // _CELMATH_SPHERE_H_
+using Spheref = Sphere<float>;
+using Sphered = Sphere<double>;
+} // namespace celestia::math

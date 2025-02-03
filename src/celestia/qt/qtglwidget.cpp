@@ -15,119 +15,119 @@
  *                                                                         *
  ***************************************************************************/
 
-#include <config.h>
-
-#include <cassert>
-#include <celengine/starbrowser.h>
-
-#include <QCursor>
-#include <QPaintDevice>
-#include <QMouseEvent>
-#include <QSettings>
-#include <QMessageBox>
-
-#ifndef DEBUG
-#  define G_DISABLE_ASSERT
-#endif
-
-#include "celengine/astro.h"
-#include "celutil/util.h"
-#include "celutil/filetype.h"
-#include "celutil/debug.h"
-#include "celutil/gettext.h"
-#include "celestia/celestiacore.h"
-#include "celengine/simulation.h"
-#ifdef USE_GLCONTEXT
-#include "celengine/glcontext.h"
-#endif
-
 #include "qtglwidget.h"
 
-#include <cmath>
-#include <vector>
+#include <cstdlib>
+#include <utility>
 
-using namespace Qt;
+#include <config.h>
 
+#include <Qt>
+#include <QtGlobal>
+#include <QCursor>
+#include <QKeyEvent>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QPoint>
+#include <QSettings>
+#include <QSize>
+#include <QString>
+#include <QWheelEvent>
 
-const int DEFAULT_ORBIT_MASK = Body::Planet | Body::Moon | Body::Stellar;
+#include <celengine/body.h>
+#include <celengine/render.h>
+#include <celengine/starcolors.h>
+#include <celestia/configfile.h>
+#include <celutil/gettext.h>
+#include "qtdraghandler.h"
 
-const int DEFAULT_LABEL_MODE = 2176;
+namespace celestia::qt
+{
 
-const float DEFAULT_AMBIENT_LIGHT_LEVEL = 0.1f;
+namespace
+{
 
-const int DEFAULT_STARS_COLOR = ColorTable_Blackbody_D65;
+constexpr auto DEFAULT_ORBIT_MASK = static_cast<int>(BodyClassification::Planet | BodyClassification::Moon | BodyClassification::Stellar);
+constexpr int DEFAULT_LABEL_MODE = Renderer::LocationLabels | Renderer::I18nConstellationLabels;
+constexpr float DEFAULT_AMBIENT_LIGHT_LEVEL = 0.1f;
+constexpr float DEFAULT_TINT_SATURATION = 0.5f;
+constexpr int DEFAULT_STARS_COLOR = static_cast<int>(ColorTableType::Blackbody_D65);
+constexpr float DEFAULT_VISUAL_MAGNITUDE = 8.0f;
+constexpr Renderer::StarStyle DEFAULT_STAR_STYLE = Renderer::FuzzyPointStars;
+constexpr unsigned int DEFAULT_TEXTURE_RESOLUTION = medres;
 
-const float DEFAULT_VISUAL_MAGNITUDE = 8.0f;
+std::pair<float, float>
+mousePosition(const QMouseEvent& m, qreal scale)
+{
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    return { static_cast<float>(m.x() * scale), static_cast<float>(m.y() * scale) };
+#else
+    auto position = m.position();
+    return { static_cast<float>(position.x() * scale), static_cast<float>(position.y() * scale) };
+#endif
+}
 
-const Renderer::StarStyle DEFAULT_STAR_STYLE = Renderer::FuzzyPointStars;
-
-const unsigned int DEFAULT_TEXTURE_RESOLUTION = medres;
-
+} // end unnamed namespace
 
 CelestiaGlWidget::CelestiaGlWidget(QWidget* parent, const char* /* name */, CelestiaCore* core) :
-    QGLWidget(parent)
+    QOpenGLWidget(parent)
 {
     setFocusPolicy(Qt::ClickFocus);
 
     appCore = core;
     appRenderer = appCore->getRenderer();
-    appSim = appCore->getSimulation();
 
     setCursor(QCursor(Qt::CrossCursor));
     currentCursor = CelestiaCore::CrossCursor;
     setMouseTracking(true);
 
+    dragHandler = createDragHandler(this, appCore);
     cursorVisible = true;
+
+    // We use glClear directly, so we don't need it called by Qt.
+    setUpdateBehavior(QOpenGLWidget::PartialUpdate);
 }
 
+CelestiaGlWidget::~CelestiaGlWidget() = default;
 
 /*!
   Paint the box. The actual openGL commands for drawing the box are
   performed here.
 */
 
-void CelestiaGlWidget::paintGL()
+void
+CelestiaGlWidget::paintGL()
 {
     appCore->draw();
 }
-
-
-#ifdef USE_GLCONTEXT
-static GLContext::GLRenderPath getBestAvailableRenderPath(const GLContext& /*glc*/)
-{
-#if 0
-    const GLContext::GLRenderPath renderPaths[] = {
-        GLContext::GLPath_GLSL,
-    };
-
-    for (auto renderPath : renderPaths)
-    {
-        if (glc.renderPathSupported(renderPath))
-            return renderPath;
-    }
-#endif
-
-    return GLContext::GLPath_GLSL;
-}
-#endif
-
 
 /*!
   Set up the OpenGL rendering state, and define display list
 */
 
-void CelestiaGlWidget::initializeGL()
+void
+CelestiaGlWidget::initializeGL()
 {
     using namespace celestia;
-    if (!gl::init(appCore->getConfig()->ignoreGLExtensions) || !gl::checkVersion(gl::GL_2_1))
+#ifdef GL_ES
+    if (!gl::init(appCore->getConfig()->renderDetails.ignoreGLExtensions) ||
+        !gl::checkVersion(gl::GLES_2))
     {
-        QMessageBox::critical(0, "Celestia", _("Celestia was unable to initialize OpenGL 2.1."));
-        exit(1);
+        QMessageBox::critical(nullptr, "Celestia", _("Celestia was unable to initialize OpenGLES 2.0."));
+        std::exit(1);
     }
+#else
+    if (!gl::init(appCore->getConfig()->renderDetails.ignoreGLExtensions) ||
+        !gl::checkVersion(gl::GL_2_1))
+    {
+        QMessageBox::critical(nullptr, "Celestia", _("Celestia was unable to initialize OpenGL 2.1."));
+        std::exit(1);
+    }
+#endif
 
     appCore->setScreenDpi(logicalDpiY() * devicePixelRatioF());
 
-    if (!appCore->initRenderer())
+    if (!appCore->initRenderer(false))
     {
         // cerr << "Failed to initialize renderer.\n";
         exit(1);
@@ -138,76 +138,59 @@ void CelestiaGlWidget::initializeGL()
     // Read saved settings
     QSettings settings;
     appRenderer->setRenderFlags(settings.value("RenderFlags", static_cast<quint64>(Renderer::DefaultRenderFlags)).toULongLong());
-    appRenderer->setOrbitMask(settings.value("OrbitMask", DEFAULT_ORBIT_MASK).toInt());
+    appRenderer->setOrbitMask(static_cast<BodyClassification>(settings.value("OrbitMask", DEFAULT_ORBIT_MASK).toInt()));
     appRenderer->setLabelMode(settings.value("LabelMode", DEFAULT_LABEL_MODE).toInt());
     appRenderer->setAmbientLightLevel((float) settings.value("AmbientLightLevel", DEFAULT_AMBIENT_LIGHT_LEVEL).toDouble());
+    appRenderer->setTintSaturation(static_cast<float>(settings.value("TintSaturation", DEFAULT_TINT_SATURATION).toDouble()));
     appRenderer->setStarStyle((Renderer::StarStyle) settings.value("StarStyle", DEFAULT_STAR_STYLE).toInt());
     appRenderer->setResolution(settings.value("TextureResolution", DEFAULT_TEXTURE_RESOLUTION).toUInt());
 
-    if (settings.value("StarsColor", DEFAULT_STARS_COLOR).toInt() == 0)
-        appRenderer->setStarColorTable(GetStarColorTable(ColorTable_Enhanced));
-    else
-        appRenderer->setStarColorTable(GetStarColorTable(ColorTable_Blackbody_D65));
+    appRenderer->setStarColorTable(static_cast<ColorTableType>(settings.value("StarsColor", DEFAULT_STARS_COLOR).toInt()));
+
+    appCore->getSimulation()->getActiveObserver()->setLocationFilter(settings.value("LocationFilter", static_cast<quint64>(Observer::DefaultLocationFilter)).toULongLong());
 
     appCore->getSimulation()->setFaintestVisible((float) settings.value("Preferences/VisualMagnitude", DEFAULT_VISUAL_MAGNITUDE).toDouble());
 
-    // Read the saved render path
-#ifdef USE_GLCONTEXT
-    GLContext::GLRenderPath bestPath = getBestAvailableRenderPath(*appRenderer->getGLContext());
-    GLContext::GLRenderPath savedPath = (GLContext::GLRenderPath) settings.value("RenderPath", bestPath).toInt();
-
-    // Use the saved path only if it's supported (otherwise a graphics card
-    // downgrade could cause Celestia to not function.)
-    GLContext::GLRenderPath usePath;
-    if (appRenderer->getGLContext()->renderPathSupported(savedPath))
-        usePath = savedPath;
-    else
-        usePath = bestPath;
-
-    appRenderer->getGLContext()->setRenderPath(usePath);
-#endif
-
-    appRenderer->setSolarSystemMaxDistance(appCore->getConfig()->SolarSystemMaxDistance);
-    appRenderer->setShadowMapSize(appCore->getConfig()->ShadowMapSize);
+    appRenderer->setSolarSystemMaxDistance(appCore->getConfig()->renderDetails.SolarSystemMaxDistance);
+    appRenderer->setShadowMapSize(appCore->getConfig()->renderDetails.ShadowMapSize);
 }
 
-
-void CelestiaGlWidget::resizeGL(int w, int h)
+void
+CelestiaGlWidget::resizeGL(int w, int h)
 {
-    appCore->resize(w, h);
+    qreal scale = devicePixelRatioF();
+    auto width = static_cast<int>(w * scale);
+    auto height = static_cast<int>(h * scale);
+    appCore->resize(width, height);
 }
 
-
-void CelestiaGlWidget::mouseMoveEvent(QMouseEvent* m)
+void
+CelestiaGlWidget::mouseMoveEvent(QMouseEvent* m)
 {
-    float scale = devicePixelRatioF();
-    int x = (int)(m->x() * scale);
-    int y = (int)(m->y() * scale);
+    qreal scale = devicePixelRatioF();
+    auto [x, y] = mousePosition(*m, scale);
 
     int buttons = 0;
-    if (m->buttons() & LeftButton)
+    if (m->buttons() & Qt::LeftButton)
         buttons |= CelestiaCore::LeftButton;
-    if (m->buttons() & MiddleButton)
+    if (m->buttons() & Qt::MiddleButton)
         buttons |= CelestiaCore::MiddleButton;
-    if (m->buttons() & RightButton)
+    if (m->buttons() & Qt::RightButton)
         buttons |= CelestiaCore::RightButton;
-    if (m->modifiers() & ShiftModifier)
+    if (m->modifiers() & Qt::ShiftModifier)
         buttons |= CelestiaCore::ShiftKey;
-    if (m->modifiers() & ControlModifier)
+    if (m->modifiers() & Qt::ControlModifier)
         buttons |= CelestiaCore::ControlKey;
 
 #ifdef __APPLE__
     // On the Mac, right dragging is be simulated with Option+left drag.
     // We may want to enable this on other platforms, though it's mostly only helpful
     // for users with single button mice.
-    if (m->modifiers() & AltModifier)
-    {
-        buttons &= ~CelestiaCore::LeftButton;
-        buttons |= CelestiaCore::RightButton;
-    }
+    if (m->modifiers() & Qt::AltModifier)
+        buttons |= CelestiaCore::AltKey;
 #endif
 
-    if ((m->buttons() & (LeftButton | RightButton)) != 0)
+    if ((m->buttons() & (Qt::LeftButton | Qt::RightButton)) != 0)
     {
         if (cursorVisible)
         {
@@ -215,20 +198,10 @@ void CelestiaGlWidget::mouseMoveEvent(QMouseEvent* m)
             setCursor(QCursor(Qt::BlankCursor));
             cursorVisible = false;
 
-            // Save the cursor position
-            QPoint pt;
-            pt.setX(m->x());
-            pt.setY(m->y());
-
-            // Store a local and global location
-            saveLocalCursorPos = pt;
-            pt = mapToGlobal(pt);
-            saveGlobalCursorPos = pt;
+            dragHandler->begin(*m, scale, buttons);
         }
 
-        // Calculate mouse delta from local coordinate then move it back to the saved location
-        appCore->mouseMove((m->x() - saveLocalCursorPos.rx()) * scale, (m->y() - saveLocalCursorPos.ry()) * scale, buttons);
-        QCursor::setPos(saveGlobalCursorPos);
+        dragHandler->move(*m, scale);
     }
     else
     {
@@ -236,58 +209,68 @@ void CelestiaGlWidget::mouseMoveEvent(QMouseEvent* m)
     }
 }
 
-
-void CelestiaGlWidget::mousePressEvent( QMouseEvent* m )
+void
+CelestiaGlWidget::mousePressEvent(QMouseEvent* m)
 {
-    float scale = devicePixelRatioF();
-    int x = (int)(m->x() * scale);
-    int y = (int)(m->y() * scale);
+    qreal scale = devicePixelRatioF();
+    auto [x, y] = mousePosition(*m, scale);
 
-    if (m->button() == LeftButton)
+    if (m->button() == Qt::LeftButton)
+    {
+        dragHandler->setButton(CelestiaCore::LeftButton);
         appCore->mouseButtonDown(x, y, CelestiaCore::LeftButton);
-    else if (m->button() == MiddleButton)
+    }
+    else if (m->button() == Qt::MiddleButton)
+    {
+        dragHandler->setButton(CelestiaCore::MiddleButton);
         appCore->mouseButtonDown(x, y, CelestiaCore::MiddleButton);
-    else if (m->button() == RightButton)
+    }
+    else if (m->button() == Qt::RightButton)
+    {
+        dragHandler->setButton(CelestiaCore::RightButton);
         appCore->mouseButtonDown(x, y, CelestiaCore::RightButton);
+    }
 }
 
-
-void CelestiaGlWidget::mouseReleaseEvent( QMouseEvent* m )
+void
+CelestiaGlWidget::mouseReleaseEvent(QMouseEvent* m)
 {
-    float scale = devicePixelRatioF();
-    int x = (int)(m->x() * scale);
-    int y = (int)(m->y() * scale);
+    qreal scale = devicePixelRatioF();
+    auto [x, y] = mousePosition(*m, scale);
 
-    if (m->button() == LeftButton)
+    if (m->button() == Qt::LeftButton)
     {
         if (!cursorVisible)
         {
             // Restore the cursor position and make it visible again.
             setCursor(QCursor(Qt::CrossCursor));
             cursorVisible = true;
-            QCursor::setPos(saveGlobalCursorPos);
+            dragHandler->finish();
         }
+        dragHandler->clearButton(CelestiaCore::LeftButton);
         appCore->mouseButtonUp(x, y, CelestiaCore::LeftButton);
     }
-    else if (m->button() == MiddleButton)
+    else if (m->button() == Qt::MiddleButton)
     {
+        dragHandler->clearButton(CelestiaCore::MiddleButton);
         appCore->mouseButtonUp(x, y, CelestiaCore::MiddleButton);
     }
-    else if (m->button() == RightButton)
+    else if (m->button() == Qt::RightButton)
     {
         if (!cursorVisible)
         {
             // Restore the cursor position and make it visible again.
             setCursor(QCursor(Qt::CrossCursor));
             cursorVisible = true;
-            QCursor::setPos(saveGlobalCursorPos);
+            dragHandler->finish();
         }
+        dragHandler->clearButton(CelestiaCore::RightButton);
         appCore->mouseButtonUp(x, y, CelestiaCore::RightButton);
     }
 }
 
-
-void CelestiaGlWidget::wheelEvent( QWheelEvent* w )
+void
+CelestiaGlWidget::wheelEvent(QWheelEvent* w)
 {
     QPoint numDegrees = w->angleDelta();
     if (numDegrees.isNull() || numDegrees.y() == 0)
@@ -303,113 +286,113 @@ void CelestiaGlWidget::wheelEvent( QWheelEvent* w )
     }
 }
 
-
-bool CelestiaGlWidget::handleSpecialKey(QKeyEvent* e, bool down)
+bool
+CelestiaGlWidget::handleSpecialKey(QKeyEvent* e, bool down)
 {
     int k = -1;
     switch (e->key())
     {
-    case Key_Up:
+    case Qt::Key_Up:
         k = CelestiaCore::Key_Up;
         break;
-    case Key_Down:
+    case Qt::Key_Down:
         k = CelestiaCore::Key_Down;
         break;
-    case Key_Left:
+    case Qt::Key_Left:
         k = CelestiaCore::Key_Left;
         break;
-    case Key_Right:
+    case Qt::Key_Right:
         k = CelestiaCore::Key_Right;
         break;
-    case Key_Home:
+    case Qt::Key_Home:
         k = CelestiaCore::Key_Home;
         break;
-    case Key_End:
+    case Qt::Key_End:
         k = CelestiaCore::Key_End;
         break;
-    case Key_F1:
+    case Qt::Key_F1:
         k = CelestiaCore::Key_F1;
         break;
-    case Key_F2:
+    case Qt::Key_F2:
         k = CelestiaCore::Key_F2;
         break;
-    case Key_F3:
+    case Qt::Key_F3:
         k = CelestiaCore::Key_F3;
         break;
-    case Key_F4:
+    case Qt::Key_F4:
         k = CelestiaCore::Key_F4;
         break;
-    case Key_F5:
+    case Qt::Key_F5:
         k = CelestiaCore::Key_F5;
         break;
-    case Key_F6:
+    case Qt::Key_F6:
         k = CelestiaCore::Key_F6;
         break;
-    case Key_F7:
+    case Qt::Key_F7:
         k = CelestiaCore::Key_F7;
         break;
-    case Key_F11:
+    case Qt::Key_F11:
         k = CelestiaCore::Key_F11;
         break;
-    case Key_F12:
+    case Qt::Key_F12:
         k = CelestiaCore::Key_F12;
         break;
-    case Key_PageDown:
+    case Qt::Key_PageDown:
         k = CelestiaCore::Key_PageDown;
         break;
-    case Key_PageUp:
+    case Qt::Key_PageUp:
         k = CelestiaCore::Key_PageUp;
         break;
-/*    case Key_F10:
+/*    case Qt::Key_F10:
         if (e->modifiers()& ShiftModifier)
             k = CelestiaCore::Key_F10;
         break;*/
-    case Key_0:
+    case Qt::Key_0:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad0;
         break;
-    case Key_1:
+    case Qt::Key_1:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad1;
         break;
-    case Key_2:
+    case Qt::Key_2:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad2;
         break;
-    case Key_3:
+    case Qt::Key_3:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad3;
         break;
-    case Key_4:
+    case Qt::Key_4:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad4;
         break;
-    case Key_5:
+    case Qt::Key_5:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad5;
         break;
-    case Key_6:
+    case Qt::Key_6:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad6;
         break;
-    case Key_7:
+    case Qt::Key_7:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad7;
         break;
-    case Key_8:
+    case Qt::Key_8:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad8;
         break;
-    case Key_9:
+    case Qt::Key_9:
         if (e->modifiers() & Qt::KeypadModifier)
             k = CelestiaCore::Key_NumPad9;
         break;
     case Qt::Key_A:
-        if (e->modifiers() == NoModifier)
+        if (e->modifiers() == Qt::NoModifier)
             k = 'A';
         break;
     case Qt::Key_Z:
-        if (e->modifiers() == NoModifier)
+        if (e->modifiers() == Qt::NoModifier)
             k = 'Z';
         break;
     }
@@ -417,7 +400,7 @@ bool CelestiaGlWidget::handleSpecialKey(QKeyEvent* e, bool down)
     if (k >= 0)
     {
         int buttons = 0;
-        if (e->modifiers() & ShiftModifier)
+        if (e->modifiers() & Qt::ShiftModifier)
             buttons |= CelestiaCore::ShiftKey;
 
         if (down)
@@ -430,21 +413,34 @@ bool CelestiaGlWidget::handleSpecialKey(QKeyEvent* e, bool down)
     return false;
 }
 
-
-void CelestiaGlWidget::keyPressEvent( QKeyEvent* e )
+void
+CelestiaGlWidget::keyPressEvent(QKeyEvent* e)
 {
     int modifiers = 0;
-    if (e->modifiers() & ShiftModifier)
+    if (e->modifiers() & Qt::ShiftModifier)
+    {
         modifiers |= CelestiaCore::ShiftKey;
-    if (e->modifiers() & ControlModifier)
+    }
+    if (e->modifiers() & Qt::ControlModifier)
+    {
         modifiers |= CelestiaCore::ControlKey;
+    }
 
+#ifdef __APPLE__
+    // Mac Option+left drag
+    if (e->modifiers() & Qt::AltModifier)
+        dragHandler->setButton(modifiers | CelestiaCore::AltKey);
+    else
+        dragHandler->setButton(modifiers);
+#else
+    dragHandler->setButton(modifiers);
+#endif
     switch (e->key())
     {
-    case Key_Escape:
+    case Qt::Key_Escape:
         appCore->charEntered('\033');
         break;
-    case Key_Backtab:
+    case Qt::Key_Backtab:
         appCore->charEntered(CelestiaCore::Key_BackTab);
         break;
     default:
@@ -470,14 +466,24 @@ void CelestiaGlWidget::keyPressEvent( QKeyEvent* e )
     }
 }
 
-
-void CelestiaGlWidget::keyReleaseEvent( QKeyEvent* e )
+void
+CelestiaGlWidget::keyReleaseEvent(QKeyEvent* e)
 {
+    int modifiers = 0;
+    if (!(e->modifiers() & Qt::ShiftModifier))
+        modifiers |= CelestiaCore::ShiftKey;
+    if (!(e->modifiers() & Qt::ControlModifier))
+        modifiers |= CelestiaCore::ControlKey;
+#ifdef __APPLE__
+    if (!(e->modifiers() & Qt::AltModifier))
+        modifiers |= CelestiaCore::AltKey;
+#endif
+    dragHandler->clearButton(modifiers);
     handleSpecialKey(e, false);
 }
 
-
-void CelestiaGlWidget::setCursorShape(CelestiaCore::CursorShape shape)
+void
+CelestiaGlWidget::setCursorShape(CelestiaCore::CursorShape shape)
 {
     Qt::CursorShape cursor;
     if (currentCursor != shape)
@@ -544,14 +550,16 @@ void CelestiaGlWidget::setCursorShape(CelestiaCore::CursorShape shape)
     }
 }
 
-
-CelestiaCore::CursorShape CelestiaGlWidget::getCursorShape() const
+CelestiaCore::CursorShape
+CelestiaGlWidget::getCursorShape() const
 {
     return currentCursor;
 }
 
-
-QSize CelestiaGlWidget::sizeHint() const
+QSize
+CelestiaGlWidget::sizeHint() const
 {
     return QSize(640, 480);
 }
+
+} // end namespace celestia::qt

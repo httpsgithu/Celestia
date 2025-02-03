@@ -10,8 +10,10 @@
 
 #pragma once
 
-#include <Eigen/Core>
 #include <vector>
+
+#include <Eigen/Core>
+
 #include "objectrenderer.h"
 #include "renderlistentry.h"
 
@@ -22,44 +24,25 @@ class StarDatabase;
 
 // TODO: move these variables to PointStarRenderer class
 // without adding a variable. Requires C++17
-constexpr const float StarDistanceLimit     = 1.0e6f;
+constexpr inline float StarDistanceLimit     = 1.0e6f;
 // Star disc size in pixels
-constexpr const float BaseStarDiscSize      = 5.0f;
-constexpr const float MaxScaledDiscStarSize = 8.0f;
-constexpr const float GlareOpacity          = 0.65f;
+constexpr inline float BaseStarDiscSize      = 5.0f;
+constexpr inline float MaxScaledDiscStarSize = 8.0f;
+constexpr inline float GlareOpacity          = 0.65f;
 
 class PointStarRenderer : public ObjectRenderer<Star, float>
 {
- public:
-#if 0
-    static constexpr const float StarDistanceLimit     = 1.0e6f;
-    // Star disc size in pixels
-    static constexpr const float BaseStarDiscSize      = 5.0f;
-    static constexpr const float MaxScaledDiscStarSize = 8.0f;
-    static constexpr const float GlareOpacity          = 0.65f;
-#endif
-
+public:
     PointStarRenderer();
-    void process(const Star &star, float distance, float appMag);
+    void process(const Star &star, float distance, float appMag) override;
 
     Eigen::Vector3d obsPos;
+    Eigen::Vector3f viewNormal;
     std::vector<RenderListEntry>* renderList    { nullptr };
     PointStarVertexBuffer* starVertexBuffer     { nullptr };
     PointStarVertexBuffer* glareVertexBuffer    { nullptr };
     const StarDatabase* starDB                  { nullptr };
     const ColorTemperatureTable* colorTemp      { nullptr };
     float SolarSystemMaxDistance                { 1.0f };
-    float maxDiscSize                           { 1.0f };
     float cosFOV                                { 1.0f };
-#ifdef DEBUG_HDR_ADAPT
-    float minMag                                { 0.0f };
-    float maxMag                                { 0.0f };
-    float minAlpha                              { 0.0f };
-    float maxAlpha                              { 0.0f };
-    float maxSize                               { 0.0f };
-    float above                                 { 0.0f };
-    unsigned long countAboveN                   { 0 };
-    unsigned long total                         { 0 };
-#endif
-    bool  useScaledDiscs                        { false };
 };

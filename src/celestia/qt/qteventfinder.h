@@ -10,33 +10,39 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTEVENTFINDER_H_
-#define _QTEVENTFINDER_H_
+#pragma once
 
 #include <QDockWidget>
 #include <QElapsedTimer>
+
 #include <celestia/eclipsefinder.h>
 
-class QTreeView;
-class QRadioButton;
-class QDateEdit;
 class QComboBox;
-class QProgressDialog;
+class QDateEdit;
 class QMenu;
-class EventTableModel;
+class QPoint;
+class QProgressDialog;
+class QRadioButton;
+class QString;
+class QTreeView;
+class QWidget;
+
 class CelestiaCore;
+
+namespace celestia::qt
+{
 
 class EventFinder : public QDockWidget, EclipseFinderWatcher
 {
     Q_OBJECT
 
- public:
+public:
     EventFinder(CelestiaCore* _appCore, const QString& title, QWidget* parent);
     ~EventFinder() = default;
 
     EclipseFinderWatcher::Status eclipseFinderProgressUpdate(double t);
 
- public slots:
+public slots:
     void slotFindEclipses();
     void slotContextMenu(const QPoint&);
 
@@ -46,7 +52,9 @@ class EventFinder : public QDockWidget, EclipseFinderWatcher
     void slotViewOccluderSurface();
     void slotViewBehindOccluder();
 
- private:
+private:
+    class EventTableModel;
+
     CelestiaCore* appCore;
 
     QRadioButton* solarOnlyButton{ nullptr };
@@ -71,4 +79,4 @@ class EventFinder : public QDockWidget, EclipseFinderWatcher
     const Eclipse* activeEclipse{ nullptr };
 };
 
-#endif // _QTEVENTFINDER_H_
+} // end namespace celestia::qt

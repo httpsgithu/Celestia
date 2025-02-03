@@ -10,14 +10,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELESTIA_XBEL_H_
-#define _CELESTIA_XBEL_H_
+#pragma once
 
 #include <QXmlStreamReader>
 #include <QXmlStreamWriter>
 
-class BookmarkItem;
+class QIODevice;
 
+namespace celestia::qt
+{
+
+class BookmarkItem;
 
 class XbelReader : public QXmlStreamReader
 {
@@ -38,7 +41,6 @@ private:
      void skipUnknownElement();
 };
 
-
 class XbelWriter : public QXmlStreamWriter
 {
 public:
@@ -50,4 +52,4 @@ private:
     void writeItem(const BookmarkItem* item);
 };
 
-#endif // _CELESTIA_XBEL_H_
+} // end namespace celestia::qt

@@ -10,16 +10,17 @@
  *  $Id: glwidget.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_GLWIDGET_H
-#define GTK_GLWIDGET_H
+#pragma once
 
 #include <gdk/gdk.h>
 #include <gtk/gtk.h>
 
 #include "common.h"
 
+namespace celestia::gtk
+{
 
 /* Initialization Functions */
 void initGLCallbacks(AppData* app);
 
-#endif /* GTK_GLWIDGET_H */
+} // end namespace celestia::gtk

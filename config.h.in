@@ -1,6 +1,16 @@
 #cmakedefine HAVE_BYTESWAP_H
-#cmakedefine HAVE_FILESYSTEM
-#cmakedefine HAVE_EXPERIMENTAL_FILESYSTEM
-#cmakedefine HAVE_STRING_VIEW
-#cmakedefine HAVE_EXPERIMENTAL_STRING_VIEW
+#cmakedefine HAVE_CHARCONV
+#cmakedefine HAVE_FLOAT_CHARCONV
+#cmakedefine HAVE_STD_FILESYSTEM
 #cmakedefine HAVE_WORDEXP
+#cmakedefine HAVE_MESHOPTIMIZER
+#cmakedefine HAVE_CONSTEXPR_CMATH
+#cmakedefine HAVE_SINCOS
+#cmakedefine HAVE_APPLE_SINCOS
+#cmakedefine HAVE_CONSTEXPR_EMPTY_ARRAY
+
+#ifdef HAVE_CONSTEXPR_CMATH
+#define CELESTIA_CMATH_CONSTEXPR constexpr
+#else
+#define CELESTIA_CMATH_CONSTEXPR
+#endif

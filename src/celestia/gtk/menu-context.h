@@ -10,8 +10,7 @@
  *  $Id: menu-context.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_MENU_CONTEXT_H
-#define GTK_MENU_CONTEXT_H
+#pragma once
 
 #include <gtk/gtk.h>
 
@@ -21,6 +20,9 @@
 
 #include "common.h"
 
+namespace celestia::gtk
+{
+
 class GTKContextMenuHandler : public CelestiaCore::ContextMenuHandler
 {
  public:
@@ -29,4 +31,4 @@ class GTKContextMenuHandler : public CelestiaCore::ContextMenuHandler
     void requestContextMenu(float, float, Selection sel);
 };
 
-#endif /* GTK_MENU_CONTEXT_H */
+} // end namespace celestia::gtk

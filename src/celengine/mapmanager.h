@@ -10,7 +10,9 @@
 
 #pragma once
 
-#include <functional>
+#include <memory>
+
+#include <celcompat/filesystem.h>
 #include <celutil/resmanager.h>
 
 // File format for data used to warp an image, for
@@ -22,7 +24,8 @@ class WarpMesh
     ~WarpMesh();
 
     // Map data to triangle vertices used for drawing
-    void scopedDataForRendering(const std::function<void(float*, int)>&) const;
+    std::vector<float> scopedDataForRendering() const;
+
     int count() const; // Number of vertices
 
     // Convert a vertex coordinate to texture coordinate
@@ -34,15 +37,22 @@ class WarpMesh
     float* data;
 };
 
-class WarpMeshInfo : public ResourceInfo<WarpMesh>
+class WarpMeshInfo
 {
  public:
+    using ResourceType = WarpMesh;
+    using ResourceKey = fs::path;
+
+    explicit WarpMeshInfo(const fs::path& source) :
+        source(source)
+    {};
+
+    fs::path resolve(const fs::path&) const;
+    std::unique_ptr<WarpMesh> load(const fs::path&) const;
+
+ private:
     fs::path source;
-
-    WarpMeshInfo(const fs::path& source) : source(source) {};
-
-    fs::path resolve(const fs::path&) override;
-    WarpMesh* load(const fs::path&) override;
+    friend bool operator<(const WarpMeshInfo&, const WarpMeshInfo&);
 };
 
 inline bool operator<(const WarpMeshInfo& wi0, const WarpMeshInfo& wi1)
@@ -50,6 +60,6 @@ inline bool operator<(const WarpMeshInfo& wi0, const WarpMeshInfo& wi1)
     return wi0.source < wi1.source;
 }
 
-typedef ResourceManager<WarpMeshInfo> WarpMeshManager;
+using WarpMeshManager = ResourceManager<WarpMeshInfo>;
 
 WarpMeshManager* GetWarpMeshManager();

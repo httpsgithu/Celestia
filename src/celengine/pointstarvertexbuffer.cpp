@@ -1,6 +1,6 @@
 // starfield.cpp
 //
-// Copyright (C) 2001-2019, the Celestia Development Team
+// Copyright (C) 2001-present, the Celestia Development Team
 // Original version by Chris Laurel <claurel@gmail.com>
 //
 // This program is free software; you can redistribute it and/or
@@ -8,99 +8,150 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include "glsupport.h"
+#include <celrender/gl/buffer.h>
+#include <celrender/gl/vertexobject.h>
 #include <celutil/color.h>
+#include "glsupport.h"
 #include "objectrenderer.h"
 #include "shadermanager.h"
 #include "render.h"
 #include "texture.h"
 #include "pointstarvertexbuffer.h"
 
+namespace gl = celestia::gl;
+namespace util = celestia::util;
+
 PointStarVertexBuffer* PointStarVertexBuffer::current = nullptr;
 
-PointStarVertexBuffer::PointStarVertexBuffer(const Renderer& _renderer,
-                                             unsigned int _capacity) :
-    renderer(_renderer),
-    capacity(_capacity)
+PointStarVertexBuffer::PointStarVertexBuffer(const Renderer &renderer,
+                                             capacity_t capacity) :
+    m_renderer(renderer),
+    m_capacity(capacity),
+    m_vertices(std::make_unique<StarVertex[]>(capacity))
 {
-    vertices = new StarVertex[capacity];
-}
-
-PointStarVertexBuffer::~PointStarVertexBuffer()
-{
-    delete[] vertices;
 }
 
 void PointStarVertexBuffer::startSprites()
 {
-    program = renderer.getShaderManager().getShader("star");
-    pointSizeFromVertex = true;
+    m_prog = m_renderer.getShaderManager().getShader("star");
+    m_pointSizeFromVertex = true;
 }
 
 void PointStarVertexBuffer::startBasicPoints()
 {
     ShaderProperties shadprop;
-    shadprop.texUsage = ShaderProperties::VertexColors | ShaderProperties::StaticPointSize;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
-    program = renderer.getShaderManager().getShader(shadprop);
-    pointSizeFromVertex = false;
+    shadprop.texUsage = TexUsage::VertexColors | TexUsage::StaticPointSize;
+    shadprop.lightModel = LightingModel::UnlitModel;
+    m_prog = m_renderer.getShaderManager().getShader(shadprop);
+    m_pointSizeFromVertex = false;
 }
 
 void PointStarVertexBuffer::render()
 {
-    if (nStars != 0)
+    if (m_nStars != 0)
     {
         makeCurrent();
-        unsigned int stride = sizeof(StarVertex);
-        glVertexAttribPointer(CelestiaGLProgram::VertexCoordAttributeIndex,
-                              3, GL_FLOAT, GL_FALSE,
-                              stride, &vertices[0].position);
-        glVertexAttribPointer(CelestiaGLProgram::ColorAttributeIndex,
-                              4, GL_UNSIGNED_BYTE, GL_TRUE,
-                              stride, &vertices[0].color);
 
-        if (pointSizeFromVertex)
-            glVertexAttribPointer(CelestiaGLProgram::PointSizeAttributeIndex,
-                                  1, GL_FLOAT, GL_FALSE,
-                                  stride, &vertices[0].size);
+        if (m_texture != nullptr)
+            m_texture->bind();
 
-        if (texture != nullptr)
-            texture->bind();
-        glDrawArrays(GL_POINTS, 0, nStars);
-        nStars = 0;
+        m_bo->invalidateData().setData(
+            util::array_view(m_vertices.get(), m_nStars),
+            gl::Buffer::BufferUsage::StreamDraw);
+
+        if (m_pointSizeFromVertex)
+            m_vo1->draw(m_nStars);
+        else
+            m_vo2->draw(m_nStars);
+        m_nStars = 0;
     }
 }
 
 void PointStarVertexBuffer::makeCurrent()
 {
-    if (current == this || program == nullptr)
+    if (current == this || m_prog == nullptr)
         return;
 
-    program->use();
-    program->setMVPMatrices(renderer.getProjectionMatrix(), renderer.getModelViewMatrix());
-    if (pointSizeFromVertex)
+    if (current != nullptr)
+        current->finish();
+
+    setupVertexArrayObject();
+
+    m_prog->use();
+    m_prog->setMVPMatrices(m_renderer.getCurrentProjectionMatrix(), m_renderer.getCurrentModelViewMatrix());
+    if (m_pointSizeFromVertex)
     {
-        program->samplerParam("starTex") = 0;
-        glEnableVertexAttribArray(CelestiaGLProgram::PointSizeAttributeIndex);
+        m_prog->samplerParam("starTex") = 0;
     }
     else
     {
-        program->pointScale = pointScale;
+        m_prog->pointScale = m_pointScale;
         glVertexAttrib1f(CelestiaGLProgram::PointSizeAttributeIndex, 1.0f);
     }
-
-    glEnableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    glEnableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
     current = this;
+}
+
+void PointStarVertexBuffer::setupVertexArrayObject()
+{
+    if (!m_initialized)
+    {
+        m_initialized = true;
+
+        m_bo = std::make_unique<gl::Buffer>();
+        m_vo1 = std::make_unique<gl::VertexObject>(gl::VertexObject::Primitive::Points);
+        m_vo2 = std::make_unique<gl::VertexObject>(gl::VertexObject::Primitive::Points);
+
+        m_vo1->addVertexBuffer(
+            *m_bo,
+            CelestiaGLProgram::VertexCoordAttributeIndex,
+            3,
+            gl::VertexObject::DataType::Float,
+            false,
+            sizeof(StarVertex),
+            offsetof(StarVertex, position));
+
+        m_vo1->addVertexBuffer(
+            *m_bo,
+            CelestiaGLProgram::ColorAttributeIndex,
+            4,
+            gl::VertexObject::DataType::UnsignedByte,
+            true,
+            sizeof(StarVertex),
+            offsetof(StarVertex, color));
+
+        m_vo1->addVertexBuffer(
+            *m_bo,
+            CelestiaGLProgram::PointSizeAttributeIndex,
+            1,
+            gl::VertexObject::DataType::Float,
+            false,
+            sizeof(StarVertex),
+            offsetof(StarVertex, size));
+
+        m_vo2->addVertexBuffer(
+            *m_bo,
+            CelestiaGLProgram::VertexCoordAttributeIndex,
+            3,
+            gl::VertexObject::DataType::Float,
+            false,
+            sizeof(StarVertex),
+            offsetof(StarVertex, position));
+
+        m_vo2->addVertexBuffer(
+            *m_bo,
+            CelestiaGLProgram::ColorAttributeIndex,
+            4,
+            gl::VertexObject::DataType::UnsignedByte,
+            true,
+            sizeof(StarVertex),
+            offsetof(StarVertex, color));
+    }
 }
 
 void PointStarVertexBuffer::finish()
 {
     render();
-    glDisableVertexAttribArray(CelestiaGLProgram::ColorAttributeIndex);
-    glDisableVertexAttribArray(CelestiaGLProgram::VertexCoordAttributeIndex);
-    if (pointSizeFromVertex)
-        glDisableVertexAttribArray(CelestiaGLProgram::PointSizeAttributeIndex);
+    current = nullptr;
 }
 
 void PointStarVertexBuffer::enable()
@@ -119,12 +170,12 @@ void PointStarVertexBuffer::disable()
 #endif
 }
 
-void PointStarVertexBuffer::setTexture(Texture* _texture)
+void PointStarVertexBuffer::setTexture(Texture *texture)
 {
-    texture = _texture;
+    m_texture = texture;
 }
 
 void PointStarVertexBuffer::setPointScale(float pointSize)
 {
-    pointScale = pointSize;
+    m_pointScale = pointSize;
 }

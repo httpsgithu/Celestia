@@ -24,7 +24,7 @@ FramebufferObject::FramebufferObject(GLuint width, GLuint height, unsigned int a
     }
 }
 
-FramebufferObject::FramebufferObject(FramebufferObject &&other) :
+FramebufferObject::FramebufferObject(FramebufferObject &&other) noexcept:
     m_width(other.m_width),
     m_height(other.m_height),
     m_colorTexId(other.m_colorTexId),
@@ -36,7 +36,7 @@ FramebufferObject::FramebufferObject(FramebufferObject &&other) :
     other.m_status = GL_FRAMEBUFFER_UNSUPPORTED;
 }
 
-FramebufferObject& FramebufferObject::operator=(FramebufferObject &&other)
+FramebufferObject& FramebufferObject::operator=(FramebufferObject &&other) noexcept
 {
     m_width        = other.m_width;
     m_height       = other.m_height;
@@ -112,8 +112,10 @@ FramebufferObject::generateDepthTexture()
     glGenTextures(1, &m_depthTexId);
     glBindTexture(GL_TEXTURE_2D, m_depthTexId);
 
+#ifndef GL_ES
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+#endif
 
     // Only nearest sampling is appropriate for depth textures
     // But we can use linear to decrease aliasing

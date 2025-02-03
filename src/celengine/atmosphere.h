@@ -8,8 +8,7 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_ATMOSPHERE_H_
-#define _CELENGINE_ATMOSPHERE_H_
+#pragma once
 
 #include <celutil/reshandle.h>
 #include <celutil/color.h>
@@ -39,7 +38,6 @@ class Atmosphere
         cloudShadowDepth(0.0f)
     {};
 
- public:
     float height;
     Color lowerColor;
     Color upperColor;
@@ -67,7 +65,4 @@ class Atmosphere
 // to render. The radius of the sphere is the height at which the
 // density of the atmosphere falls to the extinction threshold, i.e.
 // -H * ln(extinctionThreshold)
-constexpr const float AtmosphereExtinctionThreshold = 0.05f;
-
-#endif // _CELENGINE_ATMOSPHERE_H_
-
+constexpr inline float AtmosphereExtinctionThreshold = 0.05f;

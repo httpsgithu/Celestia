@@ -10,18 +10,22 @@
 // of the License, or (at your option) any later version.
 
 #include <memory>
+
+#include <Eigen/Geometry>
+
+#include <celestia/celestiacore.h>
+#include <celscript/common/scriptmaps.h>
+#include <celutil/logger.h>
+#include <celutil/stringutils.h>
 #include "celx.h"
 #include "celx_internal.h"
 #include "celx_observer.h"
-//#include <celengine/body.h>
-//#include <celengine/timelinephase.h>
-#include <celestia/celestiacore.h>
-#include <Eigen/Geometry>
 
 using namespace std;
 using namespace Eigen;
-using namespace celmath;
+using celestia::util::GetLogger;
 
+namespace astro = celestia::astro;
 
 // ==================== Observer ====================
 
@@ -41,8 +45,8 @@ Observer* to_observer(lua_State* l, int index)
 {
     CelxLua celx(l);
 
-    Observer** o = static_cast<Observer**>(lua_touserdata(l, index));
-    CelestiaCore* appCore = celx.appCore(AllErrors);
+    auto o = static_cast<Observer* const*>(lua_touserdata(l, index));
+    const CelestiaCore* appCore = celx.appCore(AllErrors);
 
     // Check if pointer is still valid, i.e. is used by a view:
     if (o != nullptr && getViewByObserver(appCore, *o) != nullptr)
@@ -239,19 +243,19 @@ static int observer_gototable(lua_State* l)
     }
 
     Observer::JourneyParams jparams;
-    jparams.duration = 5.0;
+    jparams.duration = Observer::JourneyDuration;
     jparams.from = o->getPosition();
     jparams.to = o->getPosition();
     jparams.initialOrientation = o->getOrientation();
     jparams.finalOrientation = o->getOrientation();
-    jparams.startInterpolation = 0.25;
-    jparams.endInterpolation = 0.75;
-    jparams.accelTime = 0.5;
-    jparams.traj = Observer::Linear;
+    jparams.startInterpolation = Observer::StartInterpolation;
+    jparams.endInterpolation = Observer::EndInterpolation;
+    jparams.accelTime = Observer::AccelerationTime;
+    jparams.traj = Observer::TrajectoryType::Linear;
 
     lua_pushstring(l, "duration");
     lua_gettable(l, 2);
-    jparams.duration = celx.safeGetNumber(3, NoErrors, "", 5.0);
+    jparams.duration = celx.safeGetNumber(3, NoErrors, "", Observer::JourneyDuration);
     lua_settop(l, 2);
 
     lua_pushstring(l, "from");
@@ -284,17 +288,17 @@ static int observer_gototable(lua_State* l)
 
     lua_pushstring(l, "startInterpolation");
     lua_gettable(l, 2);
-    jparams.startInterpolation = celx.safeGetNumber(3, NoErrors, "", 0.25);
+    jparams.startInterpolation = celx.safeGetNumber(3, NoErrors, "", Observer::StartInterpolation);
     lua_settop(l, 2);
 
     lua_pushstring(l, "endInterpolation");
     lua_gettable(l, 2);
-    jparams.endInterpolation = celx.safeGetNumber(3, NoErrors, "", 0.75);
+    jparams.endInterpolation = celx.safeGetNumber(3, NoErrors, "", Observer::EndInterpolation);
     lua_settop(l, 2);
 
     lua_pushstring(l, "accelTime");
     lua_gettable(l, 2);
-    jparams.accelTime = celx.safeGetNumber(3, NoErrors, "", 0.5);
+    jparams.accelTime = celx.safeGetNumber(3, NoErrors, "", Observer::AccelerationTime);
     lua_settop(l, 2);
 
     jparams.duration = max(0.0, jparams.duration);
@@ -304,7 +308,7 @@ static int observer_gototable(lua_State* l)
 
     // args are in universal coords, let setFrame handle conversion:
     auto tmp = o->getFrame();
-    o->setFrame(ObserverFrame::Universal, Selection());
+    o->setFrame(ObserverFrame::CoordinateSystem::Universal, Selection());
     o->gotoJourney(jparams);
     o->setFrame(tmp);
 
@@ -321,7 +325,7 @@ static int observer_goto(lua_State* l)
         // handle this in own function
         return observer_gototable(l);
     }
-    celx.checkArgs(1, 5, "One to four arguments expected to observer:goto");
+    celx.checkArgs(1, 6, "One to five arguments expected to observer:goto");
 
     Observer* o = this_observer(l);
 
@@ -329,20 +333,38 @@ static int observer_goto(lua_State* l)
     UniversalCoord* uc = celx.toPosition(2);
     if (sel == nullptr && uc == nullptr)
     {
-        celx.doError("First arg to observer:goto must be object or position");
+        celx.doError("First arg to observer:gotoobject must be object or position");
         return 0;
     }
 
-    double travelTime = celx.safeGetNumber(3, WrongType, "Second arg to observer:goto must be a number", 5.0);
-    double startInter = celx.safeGetNumber(4, WrongType, "Third arg to observer:goto must be a number", 0.25);
-    double endInter = celx.safeGetNumber(5, WrongType, "Fourth arg to observer:goto must be a number", 0.75);
-    if (startInter < 0 || startInter > 1) startInter = 0.25;
-    if (endInter < 0 || endInter > 1) endInter = 0.75;
+    double travelTime, startInter, endInter, accelTime;
+    travelTime = celx.safeGetNumber(3, WrongType,
+                                    "Second arg to observer:gotoobject must be a number",
+                                    Observer::JourneyDuration);
+    startInter = celx.safeGetNumber(4, WrongType,
+                                    "Third arg to observer:gotoobject must be a number",
+                                    Observer::StartInterpolation);
+    endInter = celx.safeGetNumber(5, WrongType,
+                                  "Fourth arg to observer:gotoobject must be a number",
+                                  Observer::EndInterpolation);
+    accelTime = celx.safeGetNumber(6, WrongType,
+                                   "Fifth arg to observer:goto must be a number",
+                                   Observer::AccelerationTime);
+    if (startInter < 0.0 || startInter > 1.0)
+        startInter = Observer::StartInterpolation;
+    if (endInter < 0.0 || endInter > 1.0)
+        endInter = Observer::EndInterpolation;
 
     // The first argument may be either an object or a position
     if (sel != nullptr)
     {
-        o->gotoSelection(*sel, travelTime, startInter, endInter, Vector3f::UnitY(), ObserverFrame::ObserverLocal);
+        o->gotoSelection(*sel,
+                         travelTime,
+                         startInter,
+                         endInter,
+                         accelTime,
+                         Vector3f::UnitY(),
+                         ObserverFrame::CoordinateSystem::ObserverLocal);
     }
     else
     {
@@ -371,8 +393,6 @@ static int observer_gotolonglat(lua_State* l)
     double latitude   = celx.safeGetNumber(4, WrongType, "Third arg to observer:gotolonglat must be a number", 0.0);
     double distance   = celx.safeGetNumber(5, WrongType, "Fourth arg to observer:gotolonglat must be a number", defaultDistance);
     double travelTime = celx.safeGetNumber(6, WrongType, "Fifth arg to observer:gotolonglat must be a number", 5.0);
-
-    //distance = distance / KM_PER_LY;
 
     Vector3f up = Vector3f::UnitY();
     if (lua_gettop(l) >= 7)
@@ -444,7 +464,7 @@ static int observer_gotodistance(lua_State* l)
         up = up_arg->cast<float>();
     }
 
-    o->gotoSelection(*sel, travelTime, distance, up, ObserverFrame::Universal);
+    o->gotoSelection(*sel, travelTime, distance, up, ObserverFrame::CoordinateSystem::Universal);
 
     return 0;
 }
@@ -634,7 +654,7 @@ static int observer_travelling(lua_State* l)
     celx.checkArgs(1, 1, "No arguments expected to observer:travelling");
 
     Observer* o = this_observer(l);
-    if (o->getMode() == Observer::Travelling)
+    if (o->getMode() == Observer::ObserverMode::Travelling)
         lua_pushboolean(l, 1);
     else
         lua_pushboolean(l, 0);
@@ -716,7 +736,7 @@ static int observer_setframe(lua_State* l)
     frame = celx.toFrame(2);
     if (frame != nullptr)
     {
-        obs->setFrame(std::shared_ptr<const ObserverFrame>(new ObserverFrame(*frame)));
+        obs->setFrame(std::make_shared<ObserverFrame>(*frame));
     }
     else
     {
@@ -743,7 +763,7 @@ static int observer_getspeed(lua_State* l)
     CelxLua celx(l);
     celx.checkArgs(1, 1, "No argument expected for observer:getspeed()");
 
-    Observer* obs = this_observer(l);
+    const Observer* obs = this_observer(l);
 
     lua_pushnumber(l, (lua_Number) astro::kilometersToMicroLightYears(obs->getTargetSpeed()));
 
@@ -757,7 +777,7 @@ static int observer_setfov(lua_State* l)
 
     Observer* obs = this_observer(l);
     double fov = celx.safeGetNumber(2, AllErrors, "Argument to observer:setfov() must be a number");
-    if ((fov >= degToRad(0.001f)) && (fov <= degToRad(120.0f)))
+    if ((fov >= 0.001_deg) && (fov <= 120.0_deg))
     {
         obs->setFOV((float) fov);
         celx.appCore(AllErrors)->setZoomFromFOV();
@@ -780,16 +800,18 @@ static int observer_splitview(lua_State* l)
     CelxLua celx(l);
     celx.checkArgs(2, 3, "One or two arguments expected for observer:splitview()");
 
-    Observer* obs = this_observer(l);
+    const Observer* obs = this_observer(l);
     CelestiaCore* appCore = celx.appCore(AllErrors);
     const char* splitType = celx.safeGetString(2, AllErrors, "First argument to observer:splitview() must be a string");
-    View::Type type = (compareIgnoringCase(splitType, "h") == 0) ? View::HorizontalSplit : View::VerticalSplit;
+    celestia::View::Type type = (compareIgnoringCase(splitType, "h") == 0)
+        ? celestia::View::HorizontalSplit
+        : celestia::View::VerticalSplit;
     double splitPos = celx.safeGetNumber(3, WrongType, "Number expected as argument to observer:splitview()", 0.5);
     if (splitPos < 0.1)
         splitPos = 0.1;
     if (splitPos > 0.9)
         splitPos = 0.9;
-    View* view = getViewByObserver(appCore, obs);
+    celestia::View* view = getViewByObserver(appCore, obs);
     appCore->splitView(type, view, (float)splitPos);
     return 0;
 }
@@ -799,9 +821,9 @@ static int observer_deleteview(lua_State* l)
     CelxLua celx(l);
     celx.checkArgs(1, 1, "No argument expected for observer:deleteview()");
 
-    Observer* obs = this_observer(l);
+    const Observer* obs = this_observer(l);
     CelestiaCore* appCore = celx.appCore(AllErrors);
-    View* view = getViewByObserver(appCore, obs);
+    celestia::View* view = getViewByObserver(appCore, obs);
     appCore->deleteView(view);
     return 0;
 }
@@ -811,9 +833,9 @@ static int observer_singleview(lua_State* l)
     CelxLua celx(l);
     celx.checkArgs(1, 1, "No argument expected for observer:singleview()");
 
-    Observer* obs = this_observer(l);
+    const Observer* obs = this_observer(l);
     CelestiaCore* appCore = celx.appCore(AllErrors);
-    View* view = getViewByObserver(appCore, obs);
+    const celestia::View* view = getViewByObserver(appCore, obs);
     appCore->singleView(view);
     return 0;
 }
@@ -823,9 +845,9 @@ static int observer_makeactiveview(lua_State* l)
     CelxLua celx(l);
     celx.checkArgs(1, 1, "No argument expected for observer:makeactiveview()");
 
-    Observer* obs = this_observer(l);
+    const Observer* obs = this_observer(l);
     CelestiaCore* appCore = celx.appCore(AllErrors);
-    View* view = getViewByObserver(appCore, obs);
+    const celestia::View* view = getViewByObserver(appCore, obs);
     appCore->setActiveView(view);
     return 0;
 }
@@ -877,10 +899,10 @@ static int observer_setlocationflags(lua_State* l)
             celx.doError("Values in table-argument to observer:setlocationflags() must be boolean");
             return 0;
         }
-        auto &LocationFlagMap = celx.appCore(AllErrors)->scriptMaps()->LocationFlagMap;
+        auto &LocationFlagMap = celx.appCore(AllErrors)->scriptMaps().LocationFlagMap;
         if (LocationFlagMap.count(key) == 0)
         {
-            cerr << "Unknown key: " << key << "\n";
+            GetLogger()->warn("Unknown key: {}\n", key);
         }
         else
         {
@@ -907,10 +929,14 @@ static int observer_getlocationflags(lua_State* l)
     Observer* obs = this_observer(l);
     lua_newtable(l);
     const auto locationFlags = obs->getLocationFilter();
-    auto &LocationFlagMap = celx.appCore(AllErrors)->scriptMaps()->LocationFlagMap;
+    auto &LocationFlagMap = celx.appCore(AllErrors)->scriptMaps().LocationFlagMap;
+    std::string itString;
+    itString.reserve(celestia::scripts::FlagMapNameLength);
     for (const auto& it : LocationFlagMap)
     {
-        lua_pushstring(l, it.first.c_str());
+        itString.clear();
+        itString.append(it.first);
+        lua_pushstring(l, itString.c_str());
         lua_pushboolean(l, (it.second & locationFlags) != 0);
         lua_settable(l, -3);
     }

@@ -1,6 +1,6 @@
 // geometry.h
 //
-// Copyright (C) 2004-2010, Celestia Development Team
+// Copyright (C) 2004-present, Celestia Development Team
 // Original version by Chris Laurel <claurel@gmail.com>
 //
 // This program is free software; you can redistribute it and/or
@@ -8,20 +8,18 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_GEOMETRY_H_
-#define _CELENGINE_GEOMETRY_H_
+#pragma once
+
+#include <Eigen/Geometry>
 
 #include <celmodel/material.h>
-#include <celmath/ray.h>
 
 class RenderContext;
-
 
 class Geometry
 {
 public:
-    Geometry() {};
-    virtual ~Geometry() {};
+    virtual ~Geometry() = default;
 
     //! Render the geometry in the specified OpenGL context
     virtual void render(RenderContext& rc, double t = 0.0) = 0;
@@ -31,7 +29,7 @@ public:
      *  and set distance; otherwise return false and leave
      *  distance unmodified.
      */
-    virtual bool pick(const celmath::Ray3d& r, double& distance) const = 0;
+    virtual bool pick(const Eigen::ParametrizedLine<double, 3>& r, double& distance) const = 0;
 
     virtual bool isOpaque() const = 0;
 
@@ -44,7 +42,7 @@ public:
      *  all within this geometry object. This information is used
      *  to decide whether multiple rendering passes are required.
      */
-    virtual bool usesTextureType(cmod::Material::TextureSemantic) const
+    virtual bool usesTextureType(cmod::TextureSemantic) const
     {
         return false;
     }
@@ -55,4 +53,9 @@ public:
     }
 };
 
-#endif // _CELENGINE_GEOMETRY_H_
+class EmptyGeometry : public Geometry
+{
+    void render(RenderContext&, double _t = 0.0) override { /* no-op */ }
+    bool pick(const Eigen::ParametrizedLine<double, 3>&, double&) const override { return false; }
+    bool isOpaque() const override { return true; }
+};

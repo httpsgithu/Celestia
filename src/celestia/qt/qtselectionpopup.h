@@ -10,26 +10,36 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _QTSELECTIONPOPUP_H_
-#define _QTSELECTIONPOPUP_H_
+#pragma once
+
+#include <cstdint>
 
 #include <QMenu>
-#include <celengine/selection.h>
-#include <celengine/body.h>
 
+#include <celengine/selection.h>
+
+class QAction;
+class QPoint;
+class QWidget;
+
+enum class BodyClassification : std::uint32_t;
 class CelestiaCore;
+class PlanetarySystem;
+
+namespace celestia::qt
+{
 
 class SelectionPopup : public QMenu
 {
 Q_OBJECT
 
- public:
+public:
     SelectionPopup(const Selection& sel,
                    CelestiaCore* _appCore,
                    QWidget* parent);
     ~SelectionPopup() = default;
 
- public slots:
+public slots:
     void slotSelect();
     void slotCenterSelection();
     void slotGotoSelection();
@@ -56,21 +66,20 @@ Q_OBJECT
     void popupAtGoto(const QPoint& p);
     void popupAtCenter(const QPoint& p);
 
- signals:
+signals:
     void selectionInfoRequested(Selection& sel);
 
- private:
+private:
     QMenu* createMarkMenu();
     QMenu* createReferenceVectorMenu();
     QMenu* createAlternateSurfacesMenu();
-    QMenu* createObjectMenu(PlanetarySystem* sys, unsigned int classification);
-    void addObjectMenus(PlanetarySystem* sys);
+    QMenu* createObjectMenu(const PlanetarySystem* sys, BodyClassification classification);
+    void addObjectMenus(const PlanetarySystem* sys);
 
- private:
     Selection selection;
     CelestiaCore* appCore;
     QAction* centerAction;
     QAction* gotoAction;
 };
 
-#endif // _QTSELECTIONPOPUP_H_
+} // end namespace celestia::qt

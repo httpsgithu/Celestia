@@ -7,26 +7,26 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_LOCATION_H_
-#define _CELENGINE_LOCATION_H_
+#pragma once
 
+#include <cstdint>
 #include <string>
-#include <celengine/astroobj.h>
-#include <celutil/color.h>
+#include <string_view>
+
 #include <Eigen/Core>
 
-class Selection;
-class Body;
+#include <celutil/color.h>
 
-class Location : public AstroObject
+class Body;
+class StarDatabase;
+
+class Location
 {
 public:
-    ~Location() override = default;
-
-    Selection toSelection() override;
-
-    std::string getName(bool i18n = false) const;
+    const std::string& getName(bool i18n = false) const;
     void setName(const std::string&);
+
+    std::string getPath(const StarDatabase*, char delimiter = '/') const;
 
     Eigen::Vector3f getPosition() const;
     void setPosition(const Eigen::Vector3f&);
@@ -38,10 +38,9 @@ public:
     void setImportance(float);
 
     const std::string& getInfoURL() const;
-    void setInfoURL(const std::string&);
 
     bool isLabelColorOverridden() const { return overrideLabelColor; }
-    void setLabelColorOverridden(bool override) { overrideLabelColor = override; }
+    void setLabelColorOverridden(bool _override) { overrideLabelColor = _override; }
 
     Color getLabelColor() const { return labelColor; }
     void setLabelColor(Color color) { labelColor = color; }
@@ -52,7 +51,7 @@ public:
     Eigen::Vector3d getPlanetocentricPosition(double) const;
     Eigen::Vector3d getHeliocentricPosition(double) const;
 
-    enum FeatureType : uint64_t
+    enum FeatureType : std::uint64_t
     {
         // Custom locations, part I
         City           = 0x0000000000000001,
@@ -100,8 +99,8 @@ public:
         Lacuna         = 0x0000020000000000,
         Lacus          = 0x0000040000000000,
         LargeRinged    = 0x0000080000000000,
-        Lenticula      = 0x0000100000000000,
         Lingula        = 0x0000200000000000,
+	Lobus          = 0x0000100000000000, // Lobus uses value of removed Lenticula
         Macula         = 0x0000400000000000,
         Oceanus        = 0x0000800000000000,
         Palus          = 0x0001000000000000,
@@ -123,22 +122,20 @@ public:
         Other          = 0x8000000000000000,
     };
 
-    static FeatureType parseFeatureType(const std::string&);
+    static FeatureType parseFeatureType(std::string_view);
 
     FeatureType getFeatureType() const;
     void setFeatureType(FeatureType);
 
  private:
     Body* parent{ nullptr };
-    std::string name;
-    std::string i18nName;
+    std::string name{};
+    std::string i18nName{};
     Eigen::Vector3f position{ Eigen::Vector3f::Zero() };
     float size{ 0.0f };
     float importance{ -1.0f };
     FeatureType featureType{ Other };
     bool overrideLabelColor{ false };
     Color labelColor{ 1.0f, 1.0f, 1.0f };
-    std::string infoURL;
+    std::string infoURL{};
 };
-
-#endif // _CELENGINE_LOCATION_H_

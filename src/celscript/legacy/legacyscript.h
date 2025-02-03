@@ -9,17 +9,21 @@
 
 #pragma once
 
-#include <celscript/common/script.h>
 #include <iosfwd>
+#include <memory>
+#include <string>
+
+#include <celcompat/filesystem.h>
+#include <celscript/common/script.h>
+
+
+class CelestiaCore;
+
+namespace celestia::scripts
+{
 
 class Execution;
 class ExecutionEnvironment;
-class CelestiaCore;
-
-namespace celestia
-{
-namespace scripts
-{
 
 class LegacyScript : public IScript
 {
@@ -27,7 +31,7 @@ class LegacyScript : public IScript
     LegacyScript(CelestiaCore*);
     ~LegacyScript() override = default;
 
-    bool load(std::ifstream&, const fs::path&, std::string&);
+    bool load(std::istream&, const fs::path&, std::string&);
 
     bool tick(double) override;
 
@@ -54,5 +58,4 @@ class LegacyScriptPlugin : public IScriptPlugin
     std::unique_ptr<IScript> loadScript(const fs::path&) override;
 };
 
-}
-}
+} // end namespace celestia::scripts

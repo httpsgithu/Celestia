@@ -13,19 +13,20 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <celastro/astro.h>
+#include <celcompat/numbers.h>
 #include <celutil/bytes.h>
-#include <celengine/astro.h>
 #include <celengine/stellarclass.h>
 
 using namespace std;
 
+namespace astro = celestia::astro;
 
 static string inputFilename;
 static string outputFilename;
 static string hdFilename;
 static bool useOldFormat = false;
 static bool useSphericalCoords = false;
-
 
 void Usage()
 {
@@ -110,13 +111,13 @@ void printStellarClass(uint16_t sc, ostream& out)
             switch (luminosityClass)
             {
             case StellarClass::Lum_Ia0:
-                out << "I-a0";
+                out << "Ia-0";
                 break;
             case StellarClass::Lum_Ia:
-                out << "I-a";
+                out << "Ia";
                 break;
             case StellarClass::Lum_Ib:
-                out << "I-b";
+                out << "Ib";
                 break;
             case StellarClass::Lum_II:
                 out << "II";
@@ -173,7 +174,7 @@ bool DumpOldStarDatabase(istream& in, ostream& out, ofstream& hdOut,
         /*uint8_t  parallaxError = */readUbyte(in); // not used yet
 
         // Compute distance based on parallax
-        double distance = LY_PER_PARSEC / (parallax > 0.0 ? parallax / 1000.0 : 1e-6);
+        double distance = astro::LY_PER_PARSEC<double> / (parallax > 0.0 ? parallax / 1000.0 : 1e-6);
         out << catalogNum << ' ';
         out << setprecision(8);
 
@@ -187,7 +188,7 @@ bool DumpOldStarDatabase(istream& in, ostream& out, ofstream& hdOut,
         {
             Eigen::Vector3d pos = astro::equatorialToCelestialCart((double) RA, (double) dec, distance);
             float absMag = (float) (appMag / 256.0 + 5 -
-                                    5 * log10(distance / LY_PER_PARSEC));
+                                    5 * log10(distance / astro::LY_PER_PARSEC<double>));
             out << (float) pos.x() << ' ' <<
                    (float) pos.y() << ' ' <<
                    (float) pos.z() << ' ';
@@ -257,12 +258,12 @@ bool DumpStarDatabase(istream& in, ostream& out, bool spherical)
             Eigen::Vector3d pos = astro::eclipticToEquatorial(eclipticpos);
             double distance = sqrt(x * x + y * y + z * z);
             // acos outputs angles in interval [0, pi], use negative sign for interval [-pi, 0]
-            double phi = -acos(pos.y() / distance) * 180 / PI;
-            double theta = atan2(pos.z(), -pos.x()) * 180 / PI;
+            double phi = -acos(pos.y() / distance) * 180 / celestia::numbers::pi;
+            double theta = atan2(pos.z(), -pos.x()) * 180 / celestia::numbers::pi;
             // atan2 outputs angles in interval [-pi, pi], so we add 360 to fix this
             double ra = theta - 180 + 360;
             double dec = phi + 90;
-            float appMag = float (absMag / 256.0 - 5 + 5 * log10(distance / LY_PER_PARSEC));
+            float appMag = float (absMag / 256.0 - 5 + 5 * log10(distance / astro::LY_PER_PARSEC<double>));
 
             out << fixed << setprecision(9) << (float) ra << ' ' << (float) dec << ' ';
             out << setprecision(6) << (float) distance << ' ';

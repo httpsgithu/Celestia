@@ -10,13 +10,12 @@
 #pragma once
 
 #include <memory>
+
 #include <celcompat/filesystem.h>
 
 class CelestiaCore;
 
-namespace celestia
-{
-namespace scripts
+namespace celestia::scripts
 {
 
 class IScript
@@ -74,5 +73,4 @@ class IScriptHook
     CelestiaCore *m_appCore;
 };
 
-}
-}
+} // end namespace celestia::scripts

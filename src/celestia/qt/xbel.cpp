@@ -10,20 +10,26 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <celutil/gettext.h>
 #include "xbel.h"
-#include "qtbookmark.h"
+
 #include <QBuffer>
+#include <QByteArray>
+#include <QIcon>
+#include <QLatin1String>
+#include <QPixmap>
+#include <QString>
 
+#include <celutil/gettext.h>
+#include "qtbookmark.h"
 
-XbelReader::XbelReader(QIODevice* device) :
-    QXmlStreamReader(device)
+namespace celestia::qt
 {
-}
 
+namespace
+{
 
 // Read an PNG image from a base64 encoded string.
-static QIcon CreateBookmarkIcon(const QString& iconBase64Data)
+QIcon CreateBookmarkIcon(const QString& iconBase64Data)
 {
     QByteArray iconData = QByteArray::fromBase64(iconBase64Data.toLatin1());
     QPixmap iconPixmap;
@@ -31,9 +37,8 @@ static QIcon CreateBookmarkIcon(const QString& iconBase64Data)
     return QIcon(iconPixmap);
 }
 
-
 // Return a string with icon data as a base64 encoded PNG file.
-static QString BookmarkIconData(const QIcon& icon)
+QString BookmarkIconData(const QIcon& icon)
 {
     QBuffer buffer;
     buffer.open(QIODevice::WriteOnly);
@@ -41,6 +46,12 @@ static QString BookmarkIconData(const QIcon& icon)
     return QLatin1String(buffer.buffer().toBase64().data());
 }
 
+} // end unnamed namespace
+
+XbelReader::XbelReader(QIODevice* device) :
+    QXmlStreamReader(device)
+{
+}
 
 // This code is based on QXmlStreamReader example from Qt 4.3.3
 
@@ -74,7 +85,6 @@ XbelReader::read()
     return rootItem;
 }
 
-
 void
 XbelReader::readXbel(BookmarkItem* root)
 {
@@ -97,7 +107,6 @@ XbelReader::readXbel(BookmarkItem* root)
         }
     }
 }
-
 
 void
 XbelReader::readFolder(BookmarkItem* parent)
@@ -130,7 +139,6 @@ XbelReader::readFolder(BookmarkItem* parent)
 
     parent->append(folder);
 }
-
 
 void
 XbelReader::readBookmark(BookmarkItem* parent)
@@ -167,7 +175,6 @@ XbelReader::readBookmark(BookmarkItem* parent)
     parent->append(item);
 }
 
-
 void
 XbelReader::readSeparator(BookmarkItem* parent)
 {
@@ -176,20 +183,17 @@ XbelReader::readSeparator(BookmarkItem* parent)
     readNext();
 }
 
-
 void
 XbelReader::readTitle(BookmarkItem* item)
 {
     item->setTitle(readElementText());
 }
 
-
 void
 XbelReader::readDescription(BookmarkItem* item)
 {
     item->setDescription(readElementText());
 }
-
 
 void
 XbelReader::skipUnknownElement()
@@ -205,7 +209,6 @@ XbelReader::skipUnknownElement()
     }
 }
 
-
 /***** XbelWriter *****/
 
 XbelWriter::XbelWriter(QIODevice* device) :
@@ -213,7 +216,6 @@ XbelWriter::XbelWriter(QIODevice* device) :
 {
     setAutoFormatting(true);
 }
-
 
 bool
 XbelWriter::write(const BookmarkItem* root)
@@ -230,7 +232,6 @@ XbelWriter::write(const BookmarkItem* root)
 
     return true;
 }
-
 
 void
 XbelWriter::writeItem(const BookmarkItem* item)
@@ -269,5 +270,4 @@ XbelWriter::writeItem(const BookmarkItem* item)
     }
 }
 
-
-
+} // end namespace celestia::qt

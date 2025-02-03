@@ -11,21 +11,28 @@
 // of the License, or (at your option) any later version.
 
 #include <config.h>
+
+#include <array>
 #include <cassert>
 #include <ctime>
+#include <iostream>
 #include <map>
 #include <sstream>
+#include <string_view>
 #include <utility>
-#include <celengine/astro.h>
+#include <celastro/astro.h>
 #include <celengine/asterism.h>
 #include <celscript/legacy/cmdparser.h>
 #include <celscript/legacy/execution.h>
 #include <celengine/timeline.h>
 #include <celengine/timelinephase.h>
-#include <celutil/debug.h>
 #include <celutil/gettext.h>
+#include <celutil/logger.h>
+#include <celutil/stringutils.h>
 #include <celestia/celestiacore.h>
+#include <celestia/hud.h>
 #include <celestia/url.h>
+#include <celestia/viewmanager.h>
 
 #include "celx_internal.h"
 #include "celx_misc.h"
@@ -43,26 +50,26 @@
 
 using namespace Eigen;
 using namespace std;
+using namespace std::string_view_literals;
+using celestia::util::GetLogger;
 
-const char* CelxLua::ClassNames[] =
+static constexpr std::array CelxClassNames
 {
-    "class_celestia",
-    "class_observer",
-    "class_object",
-    "class_vec3",
-    "class_matrix",
-    "class_rotation",
-    "class_position",
-    "class_frame",
-    "class_celscript",
-    "class_font",
-    "class_image",
-    "class_texture",
-    "class_phase",
-    "class_category"
+    "class_celestia"sv,
+    "class_observer"sv,
+    "class_object"sv,
+    "class_vec3"sv,
+    "class_matrix"sv,
+    "class_rotation"sv,
+    "class_position"sv,
+    "class_frame"sv,
+    "class_celscript"sv,
+    "class_font"sv,
+    "class_image"sv,
+    "class_texture"sv,
+    "class_phase"sv,
+    "class_category"sv,
 };
-
-#define CLASS(i) ClassNames[(i)]
 
 // Maximum timeslice a script may run without
 // returning control to celestia
@@ -109,7 +116,7 @@ static void openLuaLibrary(lua_State* l,
 // Push a class name onto the Lua stack
 void PushClass(lua_State* l, int id)
 {
-    lua_pushlstring(l, CelxLua::ClassNames[id], strlen(CelxLua::ClassNames[id]));
+    lua_pushlstring(l, CelxClassNames[id].data(), CelxClassNames[id].size());
 }
 
 // Set the class (metatable) of the object on top of the stack
@@ -118,9 +125,9 @@ void Celx_SetClass(lua_State* l, int id)
     PushClass(l, id);
     lua_rawget(l, LUA_REGISTRYINDEX);
     if (lua_type(l, -1) != LUA_TTABLE)
-        cout << "Metatable for " << CelxLua::ClassNames[id] << " not found!\n";
+        cout << "Metatable for " << CelxClassNames[id] << " not found!\n";
     if (lua_setmetatable(l, -2) == 0)
-        cout << "Error setting metatable for " << CelxLua::ClassNames[id] << '\n';
+        cout << "Error setting metatable for " << CelxClassNames[id] << '\n';
 }
 
 // Initialize the metatable for a class; sets the appropriate registry
@@ -167,8 +174,9 @@ bool Celx_istype(lua_State* l, int index, int id)
     }
 
     const char* classname = lua_tostring(l, -1);
+    bool result = classname != nullptr && CelxClassNames[id] == std::string_view(classname);
     lua_pop(l, 1);
-    return classname != nullptr && strcmp(classname, CelxLua::ClassNames[id]) == 0;
+    return result;
 }
 
 // Verify that an object at location index on the stack is of the
@@ -255,7 +263,7 @@ static void checkTimeslice(lua_State* l, lua_Debug* /*ar*/)
     if (luastate->timesliceExpired())
     {
         const char* errormsg = "Timeout: script hasn't returned control to celestia (forgot to call wait()?)";
-        cerr << errormsg << "\n";
+        GetLogger()->error("{}\n", errormsg);
         lua_pushstring(l, errormsg);
         lua_error(l);
     }
@@ -265,7 +273,10 @@ static void checkTimeslice(lua_State* l, lua_Debug* /*ar*/)
 // allow the script to perform cleanup
 void LuaState::cleanup()
 {
-    if (ioMode == Asking)
+    if (!costate)
+        return;
+
+    if (ioMode == IOMode::Asking)
     {
         // Restore renderflags:
         CelestiaCore* appCore = getAppCore(costate, NoErrors);
@@ -291,7 +302,10 @@ void LuaState::cleanup()
 
     timeout = getTime() + 1.0;
     if (lua_pcall(costate, 0, 0, 0) != 0)
-        cerr << "Error while executing cleanup-callback: " << lua_tostring(costate, -1) << "\n";
+    {
+        GetLogger()->error("Error while executing cleanup-callback: {}\n",
+                           lua_tostring(costate, -1));
+    }
 }
 
 
@@ -341,14 +355,13 @@ bool LuaState::timesliceExpired()
 
 static int resumeLuaThread(lua_State *L, lua_State *co, int narg)
 {
-    int status;
+    int status, nres;
 
     //if (!lua_checkstack(co, narg))
     //   luaL_error(L, "too many arguments to resume");
     lua_xmove(L, co, narg);
 #if LUA_VERSION_NUM >= 504
-    int nresults;
-    status = lua_resume(co, nullptr, narg, &nresults);
+    status = lua_resume(co, nullptr, narg, &nres);
 #elif LUA_VERSION_NUM >= 502
     status = lua_resume(co, nullptr, narg);
 #else
@@ -356,7 +369,9 @@ static int resumeLuaThread(lua_State *L, lua_State *co, int narg)
 #endif
     if (status == 0 || status == LUA_YIELD)
     {
-        int nres = lua_gettop(co);
+#if LUA_VERSION_NUM < 504
+        nres = lua_gettop(co);
+#endif
         //if (!lua_checkstack(L, narg))
         //   luaL_error(L, "too many results to resume");
         lua_xmove(co, L, nres);  // move yielded values
@@ -387,7 +402,7 @@ static const char* readStreamChunk(lua_State* /*unused*/, void* udata, size_t* s
     if (udata == nullptr)
         return nullptr;
 
-    auto* info = reinterpret_cast<ReadChunkInfo*>(udata);
+    auto* info = static_cast<ReadChunkInfo*>(udata);
     assert(info->buf != nullptr);
     assert(info->in != nullptr);
 
@@ -412,27 +427,28 @@ static const char* readStreamChunk(lua_State* /*unused*/, void* udata, size_t* s
 // Returns true if keypress has been consumed
 bool LuaState::charEntered(const char* c_p)
 {
-    if (ioMode == Asking && getTime() > timeout)
+    if (ioMode == IOMode::Asking && getTime() > timeout)
     {
         int stackTop = lua_gettop(costate);
-        if (c_p[0] == 'y')
+        // TRANSLATORS: Y is first letter of Yes
+        if (compareIgnoringCase(c_p, "Y") == 0 || compareIgnoringCase(c_p, _("Y")) == 0)
         {
             openLuaLibrary(costate, LUA_LOADLIBNAME, luaopen_package);
             openLuaLibrary(costate, LUA_IOLIBNAME, luaopen_io);
             openLuaLibrary(costate, LUA_OSLIBNAME, luaopen_os);
-            ioMode = IOAllowed;
+            ioMode = IOMode::Allowed;
         }
         else
         {
-            ioMode = IODenied;
+            ioMode = IOMode::Denied;
         }
         CelestiaCore* appCore = getAppCore(costate, NoErrors);
         if (appCore == nullptr)
         {
-            cerr << "ERROR: appCore not found\n";
+            GetLogger()->error("ERROR: appCore not found\n");
             return true;
         }
-        appCore->setTextEnterMode(appCore->getTextEnterMode() & ~CelestiaCore::KbPassToScript);
+        appCore->setTextEnterMode(appCore->getTextEnterMode() & ~celestia::Hud::TextEnterMode::PassToScript);
         appCore->showText("", 0, 0, 0, 0);
         // Restore renderflags:
         lua_pushstring(costate, "celestia-savedrenderflags");
@@ -448,7 +464,7 @@ bool LuaState::charEntered(const char* c_p)
         }
         else
         {
-            cerr << "Oops, expected savedrenderflags to be userdata\n";
+            GetLogger()->warn("Oops, expected savedrenderflags to be userdata\n");
         }
         lua_settop(costate,stackTop);
         return true;
@@ -459,7 +475,8 @@ bool LuaState::charEntered(const char* c_p)
     timeout = getTime() + 1.0;
     if (lua_pcall(costate, 1, 1, 0) != 0)
     {
-        cerr << "Error while executing keyboard-callback: " << lua_tostring(costate, -1) << "\n";
+        GetLogger()->error("Error while executing keyboard-callback: {}\n",
+                           lua_tostring(costate, -1));
         result = false;
     }
     else
@@ -486,7 +503,7 @@ bool LuaState::handleKeyEvent(const char* key)
     lua_getfield(costate, LUA_REGISTRYINDEX, EventHandlers);
     if (!lua_istable(costate, -1))
     {
-        cerr << "Missing event handler table";
+        GetLogger()->error("Missing event handler table");
         lua_pop(costate, 1);
         return false;
     }
@@ -505,7 +522,8 @@ bool LuaState::handleKeyEvent(const char* key)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 1, 1, 0) != 0)
         {
-            cerr << "Error while executing keyboard callback: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing keyboard callback: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -533,7 +551,7 @@ bool LuaState::handleMouseButtonEvent(float x, float y, int button, bool down)
     lua_getfield(costate, LUA_REGISTRYINDEX, EventHandlers);
     if (!lua_istable(costate, -1))
     {
-        cerr << "Missing event handler table";
+        GetLogger()->error("Missing event handler table");
         lua_pop(costate, 1);
         return false;
     }
@@ -558,7 +576,8 @@ bool LuaState::handleMouseButtonEvent(float x, float y, int button, bool down)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 1, 1, 0) != 0)
         {
-            cerr << "Error while executing keyboard callback: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing keyboard callback: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -589,7 +608,7 @@ bool LuaState::handleTickEvent(double dt)
     lua_getfield(costate, LUA_REGISTRYINDEX, EventHandlers);
     if (!lua_istable(costate, -1))
     {
-        cerr << "Missing event handler table";
+        GetLogger()->error("Missing event handler table");
         lua_pop(costate, 1);
         return false;
     }
@@ -608,7 +627,8 @@ bool LuaState::handleTickEvent(double dt)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 1, 1, 0) != 0)
         {
-            cerr << "Error while executing tick callback: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing tick callback: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -690,7 +710,7 @@ int LuaState::resume()
         return 1; // just the error string
     }
 
-    if (ioMode == Asking)
+    if (ioMode == IOMode::Asking)
     {
         // timeout now is used to first only display warning, and 1s
         // later allow response to avoid accidental activation
@@ -710,16 +730,13 @@ int LuaState::resume()
 void Celx_DoError(lua_State* l, const char* errorMsg)
 {
     lua_Debug debug;
-    if (lua_getstack(l, 1, &debug))
+    if (lua_getstack(l, 1, &debug) && lua_getinfo(l, "l", &debug))
     {
-        if (lua_getinfo(l, "l", &debug))
-        {
-            string buf = fmt::sprintf("In line %i: %s", debug.currentline, errorMsg);
-            lua_pushstring(l, buf.c_str());
-            lua_error(l);
-        }
+        string buf = fmt::format(_("In line {}: {}"), debug.currentline, errorMsg);
+        lua_pushstring(l, buf.c_str());
     }
-    lua_pushstring(l, errorMsg);
+    else
+        lua_pushstring(l, errorMsg);
     lua_error(l);
 }
 
@@ -737,12 +754,12 @@ bool LuaState::tick(double dt)
     if (!isAlive())
         return false;
 
-    if (ioMode == Asking)
+    if (ioMode == IOMode::Asking)
     {
         CelestiaCore* appCore = getAppCore(costate, NoErrors);
         if (appCore == nullptr)
         {
-            cerr << "ERROR: appCore not found\n";
+            GetLogger()->error("ERROR: appCore not found\n");
             return true;
         }
         lua_pushstring(state, "celestia-savedrenderflags");
@@ -767,7 +784,7 @@ bool LuaState::tick(double dt)
                               "y = yes, ESC = cancel script, any other key = no"),
                               0, 0,
                               -15, 5, 5);
-            appCore->setTextEnterMode(appCore->getTextEnterMode() | CelestiaCore::KbPassToScript);
+            appCore->setTextEnterMode(appCore->getTextEnterMode() | celestia::Hud::TextEnterMode::PassToScript);
         }
         else
         {
@@ -777,7 +794,7 @@ bool LuaState::tick(double dt)
                               "Do you trust the script and want to allow this?"),
                               0, 0,
                               -15, 5, 5);
-            appCore->setTextEnterMode(appCore->getTextEnterMode() & ~CelestiaCore::KbPassToScript);
+            appCore->setTextEnterMode(appCore->getTextEnterMode() & ~celestia::Hud::TextEnterMode::PassToScript);
         }
 
         return false;
@@ -815,24 +832,26 @@ void LuaState::requestIO()
     // and can request keyboard. We can't do this now
     // because the script is still active and could
     // disable keyboard again.
-    if (ioMode == NoIO)
+    if (ioMode == IOMode::NotDetermined)
     {
         CelestiaCore* appCore = getAppCore(state, AllErrors);
-        string policy = appCore->getConfig()->scriptSystemAccessPolicy;
-        if (policy == "allow")
+        auto policy = appCore->getScriptSystemAccessPolicy();
+        switch (policy)
         {
+        case CelestiaCore::ScriptSystemAccessPolicy::Allow:
             openLuaLibrary(costate, LUA_LOADLIBNAME, luaopen_package);
             openLuaLibrary(costate, LUA_IOLIBNAME, luaopen_io);
             openLuaLibrary(costate, LUA_OSLIBNAME, luaopen_os);
-            ioMode = IOAllowed;
-        }
-        else if (policy == "deny")
-        {
-            ioMode = IODenied;
-        }
-        else
-        {
-            ioMode = Asking;
+            ioMode = IOMode::Allowed;
+            break;
+        case CelestiaCore::ScriptSystemAccessPolicy::Deny:
+            ioMode = IOMode::Denied;
+            break;
+        case CelestiaCore::ScriptSystemAccessPolicy::Ask:
+            ioMode = IOMode::Asking;
+            break;
+        default:
+            GetLogger()->error("Unknown script system access policy {}", static_cast<int>(policy));
         }
     }
 }
@@ -850,29 +869,29 @@ void Celx_CheckArgs(lua_State* l,
 }
 
 
-ObserverFrame::CoordinateSystem parseCoordSys(const string& name)
+ObserverFrame::CoordinateSystem parseCoordSys(std::string_view name)
 {
     // 'planetographic' is a deprecated name for bodyfixed, but maintained here
     // for compatibility with older scripts.
 
-    if (compareIgnoringCase(name, "universal") == 0)
-        return ObserverFrame::Universal;
-    if (compareIgnoringCase(name, "ecliptic") == 0)
-        return ObserverFrame::Ecliptical;
-    if (compareIgnoringCase(name, "equatorial") == 0)
-        return ObserverFrame::Equatorial;
-    if (compareIgnoringCase(name, "bodyfixed") == 0)
-        return ObserverFrame::BodyFixed;
-    if (compareIgnoringCase(name, "planetographic") == 0)
-        return ObserverFrame::BodyFixed;
-    if (compareIgnoringCase(name, "observer") == 0)
-        return ObserverFrame::ObserverLocal;
-    if (compareIgnoringCase(name, "lock") == 0)
-        return ObserverFrame::PhaseLock;
-    if (compareIgnoringCase(name, "chase") == 0)
-        return ObserverFrame::Chase;
+    if (compareIgnoringCase(name, "universal"sv) == 0)
+        return ObserverFrame::CoordinateSystem::Universal;
+    if (compareIgnoringCase(name, "ecliptic"sv) == 0)
+        return ObserverFrame::CoordinateSystem::Ecliptical;
+    if (compareIgnoringCase(name, "equatorial"sv) == 0)
+        return ObserverFrame::CoordinateSystem::Equatorial;
+    if (compareIgnoringCase(name, "bodyfixed"sv) == 0)
+        return ObserverFrame::CoordinateSystem::BodyFixed;
+    if (compareIgnoringCase(name, "planetographic"sv) == 0)
+        return ObserverFrame::CoordinateSystem::BodyFixed;
+    if (compareIgnoringCase(name, "observer"sv) == 0)
+        return ObserverFrame::CoordinateSystem::ObserverLocal;
+    if (compareIgnoringCase(name, "lock"sv) == 0)
+        return ObserverFrame::CoordinateSystem::PhaseLock;
+    if (compareIgnoringCase(name, "chase"sv) == 0)
+        return ObserverFrame::CoordinateSystem::Chase;
 
-    return ObserverFrame::Universal;
+    return ObserverFrame::CoordinateSystem::Universal;
 }
 
 
@@ -903,19 +922,19 @@ LuaState* getLuaStateObject(lua_State* l)
 
 // Map the observer to its View. Return nullptr if no view exists
 // for this observer (anymore).
-View* getViewByObserver(CelestiaCore* appCore, Observer* obs)
+celestia::View* getViewByObserver(const CelestiaCore* appCore, const Observer* obs)
 {
-    for (const auto view : appCore->views)
+    for (const auto view : appCore->viewManager->views())
         if (view->observer == obs)
             return view;
     return nullptr;
 }
 
 // Fill list with all Observers
-void getObservers(CelestiaCore* appCore, vector<Observer*>& observerList)
+void getObservers(const CelestiaCore* appCore, vector<Observer*>& observerList)
 {
-    for (const auto view : appCore->views)
-        if (view->type == View::ViewWindow)
+    for (const auto view : appCore->viewManager->views())
+        if (view->type == celestia::View::ViewWindow)
             observerList.push_back(view->observer);
 }
 
@@ -931,7 +950,7 @@ const char* Celx_SafeGetString(lua_State* l,
 {
     if (l == nullptr)
     {
-        cerr << "Error: LuaState invalid in Celx_SafeGetString\n";
+        GetLogger()->error("Error: LuaState invalid in Celx_SafeGetString\n");
         return nullptr;
     }
     int argc = lua_gettop(l);
@@ -958,7 +977,7 @@ lua_Number Celx_SafeGetNumber(lua_State* l, int index, FatalErrors fatalErrors,
 {
     if (l == nullptr)
     {
-        cerr << "Error: LuaState invalid in Celx_SafeGetNumber\n";
+        GetLogger()->error("Error: LuaState invalid in Celx_SafeGetNumber\n");
         return 0.0;
     }
     int argc = lua_gettop(l);
@@ -991,7 +1010,7 @@ bool Celx_SafeGetBoolean(lua_State* l, int index, FatalErrors fatalErrors,
 {
     if (l == nullptr)
     {
-        cerr << "Error: LuaState invalid in Celx_SafeGetBoolean\n";
+        GetLogger()->error("Error: LuaState invalid in Celx_SafeGetBoolean\n");
         return false;
     }
     int argc = lua_gettop(l);
@@ -1059,7 +1078,7 @@ bool LuaState::init(CelestiaCore* appCore)
         return false;
     }
 
-    lua_pushnumber(state, (lua_Number)KM_PER_LY/1e6);
+    lua_pushnumber(state, celestia::astro::KM_PER_LY<lua_Number>/1e6);
     lua_setglobal(state, "KM_PER_MICROLY");
 
     loadLuaLibs(state);
@@ -1126,9 +1145,7 @@ static void loadLuaLibs(lua_State* state)
     ExtendCelestiaMetaTable(state);
     ExtendObjectMetaTable(state);
 
-#ifndef GL_ES
     LoadLuaGraphicsLibrary(state);
-#endif
 }
 
 
@@ -1137,7 +1154,7 @@ void LuaState::allowSystemAccess()
     openLuaLibrary(state, LUA_LOADLIBNAME, luaopen_package);
     openLuaLibrary(state, LUA_IOLIBNAME, luaopen_io);
     openLuaLibrary(state, LUA_OSLIBNAME, luaopen_os);
-    ioMode = IOAllowed;
+    ioMode = IOMode::Allowed;
 }
 
 
@@ -1187,7 +1204,8 @@ bool LuaState::callLuaHook(void* obj, const char* method)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 1, 1, 0) != 0)
         {
-            cerr << "Error while executing Lua Hook: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing Lua Hook: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -1230,7 +1248,8 @@ bool LuaState::callLuaHook(void* obj, const char* method, const char* keyName)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 2, 1, 0) != 0)
         {
-            cerr << "Error while executing Lua Hook: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing Lua Hook: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -1274,7 +1293,8 @@ bool LuaState::callLuaHook(void* obj, const char* method, float x, float y)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 3, 1, 0) != 0)
         {
-            cerr << "Error while executing Lua Hook: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing Lua Hook: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
@@ -1319,11 +1339,12 @@ bool LuaState::callLuaHook(void* obj, const char* method, float x, float y, int 
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 4, 1, 0) != 0)
         {
-            cerr << "Error while executing Lua Hook: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing Lua Hook: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
-           handled = lua_toboolean(costate, -1) == 1 ? true : false;
+           handled = lua_toboolean(costate, -1) == 1;
         }
         lua_pop(costate, 1);             // pop the return value
     }
@@ -1361,11 +1382,12 @@ bool LuaState::callLuaHook(void* obj, const char* method, double dt)
         timeout = getTime() + 1.0;
         if (lua_pcall(costate, 2, 1, 0) != 0)
         {
-            cerr << "Error while executing Lua Hook: " << lua_tostring(costate, -1) << "\n";
+            GetLogger()->error("Error while executing Lua Hook: {}\n",
+                               lua_tostring(costate, -1));
         }
         else
         {
-           handled = lua_toboolean(costate, -1) == 1 ? true : false;
+           handled = lua_toboolean(costate, -1) == 1;
         }
         lua_pop(costate, 1);             // pop the return value
     }
@@ -1407,21 +1429,20 @@ bool CelxLua::isType(int index, int type) const
     return Celx_istype(m_lua, index, type);
 }
 
-Value *CelxLua::getValue(int index)
+Value CelxLua::getValue(int index)
 {
-    Value *v = nullptr;
     if (isInteger(index))
-        v = new Value((double)getInt(index));
-    else if (isNumber(index))
-        v = new Value(getNumber(index));
-    else if (isBoolean(index))
-        v = new Value(getBoolean(index));
-    else if (isString(index))
-        v = new Value(getString(index));
-    else if (isTable(index))
+        return Value((double)getInt(index));
+    if (isNumber(index))
+        return Value(getNumber(index));
+    if (isBoolean(index))
+        return Value(getBoolean(index));
+    if (isString(index))
+        return Value(getString(index));
+    if (isTable(index))
     {
-        ::Array *array = new ::Array;
-        Hash *hash = new Hash;
+        auto array = std::make_unique<ValueArray>();
+        auto hash = std::make_unique<Hash>();
         push();
         while(lua_next(m_lua, index) != 0)
         {
@@ -1429,7 +1450,6 @@ Value *CelxLua::getValue(int index)
             {
                 if (hash != nullptr)
                 {
-                    delete hash;
                     hash = nullptr;
                 }
                 if (array != nullptr)
@@ -1441,12 +1461,11 @@ Value *CelxLua::getValue(int index)
             {
                 if (array != nullptr)
                 {
-                    delete array;
                     array = nullptr;
                 }
                 if (hash != nullptr)
                 {
-                    hash->addValue(getString(-2), *getValue(-1));
+                    hash->addValue(getString(-2), getValue(-1));
                 }
             }
             pop(1);
@@ -1455,11 +1474,12 @@ Value *CelxLua::getValue(int index)
         }
         pop(1);
         if (hash != nullptr)
-            v = new Value(hash);
+            return Value(std::move(hash));
         else if (array != nullptr)
-            v = new Value(array);
+            return Value(std::move(array));
     }
-    return v;
+
+    return Value();
 }
 
 void CelxLua::setClass(int id)
@@ -1467,11 +1487,15 @@ void CelxLua::setClass(int id)
     Celx_SetClass(m_lua, id);
 }
 
+std::string_view CelxLua::classNameForId(int id)
+{
+    return CelxClassNames[id];
+}
 
 // Push a class name onto the Lua stack
 void CelxLua::pushClassName(int id)
 {
-    lua_pushlstring(m_lua, ClassNames[id], strlen(ClassNames[id]));
+    lua_pushlstring(m_lua, CelxClassNames[id].data(), CelxClassNames[id].size());
 }
 
 

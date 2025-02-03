@@ -2,7 +2,7 @@
 //
 // Visible region reference mark for ellipsoidal bodies.
 //
-// Copyright (C) 2008, the Celestia Development Team
+// Copyright (C) 2008-present, the Celestia Development Team
 // Initial version by Chris Laurel, claurel@gmail.com
 //
 // This program is free software; you can redistribute it and/or
@@ -12,17 +12,18 @@
 
 #include <cmath>
 #include <Eigen/Geometry>
+#include <celcompat/numbers.h>
 #include <celmath/intersect.h>
+#include <celrender/linerenderer.h>
 #include "body.h"
 #include "render.h"
 #include "selection.h"
-#include "vecgl.h"
-#include "vertexobject.h"
 #include "visibleregion.h"
 
 using namespace std;
 using namespace Eigen;
-using namespace celmath;
+using celestia::render::LineRenderer;
+namespace math = celestia::math;
 
 
 /*! Construct a new reference mark that shows the outline of the
@@ -40,11 +41,7 @@ VisibleRegion::VisibleRegion(const Body& body, const Selection& target) :
     m_body(body),
     m_target(target),
     m_color(1.0f, 1.0f, 0.0f),
-#ifdef USE_HDR
-    m_opacity(0.0f)
-#else
     m_opacity(1.0f)
-#endif
 {
     setTag("visible region");
 }
@@ -75,80 +72,10 @@ void
 VisibleRegion::setOpacity(float opacity)
 {
     m_opacity = opacity;
-#ifdef USE_HDR
-    m_opacity = 1.0f - opacity;
-#endif
 }
 
 
 constexpr const unsigned maxSections = 360;
-
-static void
-renderTerminator(Renderer* renderer,
-                 const vector<LineStripEnd>& pos,
-                 const Color& color,
-                 const Matrices& mvp)
-{
-    /*!
-     * Proper terminator calculation requires double precision floats in GLSL
-     * which were introduced in ARB_gpu_shader_fp64 unavailable with GL2.1.
-     * Because of this we make calculations on a CPU and stream results to GPU.
-     */
-
-    using AttributesType = celgl::VertexObject::AttributesType;
-
-    ShaderProperties shadprop;
-    shadprop.texUsage = ShaderProperties::VertexColors;
-    shadprop.lightModel = ShaderProperties::UnlitModel;
-
-    bool lineAsTriangles = renderer->shouldDrawLineAsTriangles();
-    if (lineAsTriangles)
-        shadprop.texUsage |= ShaderProperties::LineAsTriangles;
-
-    auto *prog = renderer->getShaderManager().getShader(shadprop);
-    if (prog == nullptr)
-        return;
-
-    auto &vo = renderer->getVertexObject(VOType::Terminator, GL_ARRAY_BUFFER, 0, GL_STREAM_DRAW);
-
-    vo.bindWritable(lineAsTriangles ? AttributesType::Default : AttributesType::Alternative1);
-    if (!vo.initialized())
-    {
-        vo.setBufferSize((maxSections + 2) * 2 * sizeof(LineStripEnd));
-        vo.allocate();
-
-        // Attributes for lines drawn as triangles
-        vo.setVertices(3, GL_FLOAT, false, sizeof(LineStripEnd), 0);
-        vo.setVertexAttribArray(CelestiaGLProgram::NextVCoordAttributeIndex,
-                                3, GL_FLOAT, false, sizeof(LineStripEnd)
-                                , 2 * sizeof(LineStripEnd) + offsetof(LineStripEnd, point));
-        vo.setVertexAttribArray(CelestiaGLProgram::ScaleFactorAttributeIndex,
-                                1, GL_FLOAT, false, sizeof(LineStripEnd)
-                                , offsetof(LineStripEnd, scale));
-
-        // Attributes for lines drawn as lines
-        vo.setVertices(3, GL_FLOAT, false, 2 * sizeof(LineStripEnd), 0, AttributesType::Alternative1);
-    }
-
-    vo.setBufferData(pos.data(), 0, pos.size() * sizeof(LineStripEnd));
-
-    prog->use();
-    prog->setMVPMatrices(*mvp.projection, *mvp.modelview);
-    glVertexAttrib(CelestiaGLProgram::ColorAttributeIndex, color);
-    if (lineAsTriangles)
-    {
-        prog->lineWidthX = renderer->getLineWidthX();
-        prog->lineWidthY = renderer->getLineWidthY();
-        vo.draw(GL_TRIANGLE_STRIP, pos.size() - 2);
-    }
-    else
-    {
-        vo.draw(GL_LINE_STRIP, (pos.size() - 2) / 2, 0);
-    }
-
-    vo.unbind();
-}
-
 
 void
 VisibleRegion::render(Renderer* renderer,
@@ -157,6 +84,10 @@ VisibleRegion::render(Renderer* renderer,
                       double tdb,
                       const Matrices& m) const
 {
+    // Proper terminator calculation requires double precision floats in GLSL
+    // which were introduced in ARB_gpu_shader_fp64 unavailable with GL2.1.
+    // Because of this we make calculations on a CPU and stream results to GPU.
+
     // Don't render anything if the current time is not within the
     // target object's time window.
     if (m_target.body() != nullptr)
@@ -189,17 +120,6 @@ VisibleRegion::render(Renderer* renderer,
     scale = max(scale, 1.0001f);
 
     Vector3f semiAxes = m_body.getSemiAxes();
-
-    // Enable depth buffering
-    renderer->enableDepthTest();
-    renderer->enableDepthMask();
-    renderer->enableBlending();
-#ifdef USE_HDR
-    renderer->setBlendingFactors(GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
-#else
-    renderer->setBlendingFactors(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#endif
-
     double maxSemiAxis = m_body.getRadius();
 
     // In order to avoid precision problems and extremely large values, scale
@@ -225,27 +145,32 @@ VisibleRegion::render(Renderer* renderer,
     Vector3d e_ = e.cwiseProduct(recipSemiAxes);
     double ee = e_.squaredNorm();
 
-    vector<LineStripEnd> pos;
-    pos.reserve((nSections + 2) * 2);
+    LineRenderer lr(*renderer, 1.0f, LineRenderer::PrimType::LineStrip);
+    lr.startUpdate();
 
     for (unsigned i = 0; i <= nSections + 1; i++)
     {
-        double theta = (double) i / (double) (nSections) * 2.0 * PI;
+        double theta = (double) i / (double) (nSections) * 2.0 * celestia::numbers::pi;
         Vector3d w = cos(theta) * uAxis + sin(theta) * vAxis;
 
-        Vector3d toCenter = ellipsoidTangent(recipSemiAxes, w, e, e_, ee);
+        Vector3d toCenter = math::ellipsoidTangent(recipSemiAxes, w, e, e_, ee);
         toCenter *= maxSemiAxis * scale;
-        Vector3f thisPoint = toCenter.cast<float>();
-        pos.emplace_back(thisPoint, -0.5);
-        pos.emplace_back(thisPoint, 0.5);
+        lr.addVertex(Vector3f(toCenter.cast<float>()));
     }
 
     Affine3f transform = Translation3f(position) * qf.conjugate();
     Matrix4f modelView = (*m.modelview) * transform.matrix();
-    renderTerminator(renderer, pos, Color(m_color, opacity), { m.projection, &modelView });
 
-    renderer->enableBlending();
-    renderer->setBlendingFactors(GL_SRC_ALPHA, GL_ONE);
+    Renderer::PipelineState ps;
+    ps.blending = true;
+    ps.blendFunc = {GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA};
+    ps.depthMask = true;
+    ps.depthTest = true;
+    ps.smoothLines = true;
+    renderer->setPipelineState(ps);
+
+    lr.render({ m.projection, &modelView }, Color(m_color, opacity), nSections+1, 0);
+    lr.finish();
 }
 
 

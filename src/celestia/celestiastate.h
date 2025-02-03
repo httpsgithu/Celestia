@@ -28,8 +28,6 @@ class CelestiaCore;
 class CelestiaState
 {
  public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
     CelestiaState() = default;
     CelestiaState(CelestiaCore* appCore);
     ~CelestiaState() = default;
@@ -42,7 +40,7 @@ class CelestiaState
  private:
     // Observer frame, position, and orientation. For multiview, there needs
     // be one instance of these parameters per view saved.
-    ObserverFrame::CoordinateSystem m_coordSys              { ObserverFrame::Universal };
+    ObserverFrame::CoordinateSystem m_coordSys              { ObserverFrame::CoordinateSystem::Universal };
     UniversalCoord                  m_observerPosition      { 0.0, 0.0, 0.0 };
     Eigen::Quaternionf              m_observerOrientation   { Eigen::Quaternionf::Identity() };
     float                           m_fieldOfView           { 45.0f };

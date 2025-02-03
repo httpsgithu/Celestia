@@ -10,13 +10,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_SPICEROTATION_H_
-#define _CELENGINE_SPICEROTATION_H_
+#pragma once
 
-#include "rotation.h"
 #include <string>
-#include <list>
+
+#include <Eigen/Geometry>
+
 #include <celcompat/filesystem.h>
+#include "rotation.h"
+
+namespace celestia::ephem
+{
 
 class SpiceRotation : public CachingRotationModel
 {
@@ -31,19 +35,29 @@ class SpiceRotation : public CachingRotationModel
                   double period);
     virtual ~SpiceRotation() = default;
 
-    bool init(const fs::path& path,
-              const std::list<std::string>* requiredKernels);
+    template<typename It>
+    bool init(const fs::path& path, It begin, It end)
+    {
+        // Load required kernel files
+        while (begin != end)
+        {
+            if (!loadRequiredKernel(path, *(begin++)))
+                return false;
+        }
 
-    bool isPeriodic() const;
-    double getPeriod() const;
+        return init();
+    }
+
+    bool isPeriodic() const override;
+    double getPeriod() const override;
 
     // No notion of an equator for SPICE rotation models
-    Eigen::Quaterniond computeEquatorOrientation(double /* tdb */) const
+    Eigen::Quaterniond computeEquatorOrientation(double /* tdb */) const override
     {
         return Eigen::Quaterniond::Identity();
     }
 
-    Eigen::Quaterniond computeSpin(double jd) const;
+    Eigen::Quaterniond computeSpin(double jd) const override;
 
  private:
     const std::string m_frameName;
@@ -52,7 +66,9 @@ class SpiceRotation : public CachingRotationModel
     bool m_spiceErr;
     double m_validIntervalBegin;
     double m_validIntervalEnd;
-    bool m_useDefaultTimeInterval;
+
+    bool loadRequiredKernel(const fs::path&, const std::string&);
+    bool init();
 };
 
-#endif // _CELENGINE_SPICEROTATION_H_
+}

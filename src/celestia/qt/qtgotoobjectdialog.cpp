@@ -1,10 +1,24 @@
-#include <QPushButton>
-#include <QLocale>
 #include "qtgotoobjectdialog.h"
-#include <celestia/celestiacore.h>
 
-using namespace Eigen;
-using namespace celmath;
+#include <string>
+
+#include <Eigen/Core>
+
+#include <QDialogButtonBox>
+#include <QLocale>
+#include <QPushButton>
+#include <QString>
+
+#include <celastro/astro.h>
+#include <celengine/body.h>
+#include <celengine/observer.h>
+#include <celengine/selection.h>
+#include <celengine/simulation.h>
+#include <celestia/celestiacore.h>
+#include <celmath/mathlib.h>
+
+namespace celestia::qt
+{
 
 GoToObjectDialog::GoToObjectDialog(QWidget *parent, CelestiaCore* _appCore) :
     QDialog(parent),
@@ -36,12 +50,13 @@ GoToObjectDialog::GoToObjectDialog(QWidget *parent, CelestiaCore* _appCore) :
     ui.kmButton->setChecked(true);
 }
 
-void GoToObjectDialog::on_buttonBox_accepted()
+void
+GoToObjectDialog::on_buttonBox_accepted()
 {
     QString objectName = ui.objectName->text();
 
     Simulation *simulation = appCore->getSimulation();
-    Selection sel = simulation->findObjectFromPath(objectName.toStdString());
+    Selection sel = simulation->findObjectFromPath(objectName.toStdString(), true);
 
     simulation->setSelection(sel);
     simulation->follow();
@@ -74,20 +89,21 @@ void GoToObjectDialog::on_buttonBox_accepted()
     {
         simulation->gotoSelectionLongLat(5.0,
                                          distance,
-                                         degToRad(longitude),
-                                         degToRad(latitude),
-                                         Vector3f::UnitY());
+                                         math::degToRad(longitude),
+                                         math::degToRad(latitude),
+                                         Eigen::Vector3f::UnitY());
     }
     else
     {
         simulation->gotoSelection(5.0,
                                   distance,
-                                  Vector3f::UnitY(),
-                                  ObserverFrame::ObserverLocal);
+                                  Eigen::Vector3f::UnitY(),
+                                  ObserverFrame::CoordinateSystem::ObserverLocal);
     }
 }
 
-void GoToObjectDialog::on_objectName_textChanged(const QString &objectName)
+void
+GoToObjectDialog::on_objectName_textChanged(const QString &objectName)
 {
     QPushButton *okButton = ui.buttonBox->button(QDialogButtonBox::Ok);
 
@@ -98,6 +114,8 @@ void GoToObjectDialog::on_objectName_textChanged(const QString &objectName)
     }
 
     // Enable OK button only if we have found the object
-    Selection sel = appCore->getSimulation()->findObjectFromPath(objectName.toStdString());
+    Selection sel = appCore->getSimulation()->findObjectFromPath(objectName.toStdString(), true);
     okButton->setEnabled(!sel.empty());
 }
+
+} // end namespace celestia::qt

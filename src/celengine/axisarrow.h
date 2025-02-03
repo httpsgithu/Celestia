@@ -8,8 +8,7 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_AXISARROW_H_
-#define _CELENGINE_AXISARROW_H_
+#pragma once
 
 #include <celutil/color.h>
 #include <celengine/referencemark.h>
@@ -20,14 +19,13 @@
 
 class Body;
 
-
 class ArrowReferenceMark : public ReferenceMark
 {
- public:
-    ArrowReferenceMark(const Body& _body);
+public:
+    explicit ArrowReferenceMark(const Body& _body);
 
     void setSize(float _size);
-    void setColor(Color _color);
+    void setColor(const Color& _color);
 
     void render(Renderer* renderer,
                 const Eigen::Vector3f& position,
@@ -46,21 +44,20 @@ class ArrowReferenceMark : public ReferenceMark
 
     virtual Eigen::Vector3d getDirection(double tdb) const = 0;
 
- protected:
+protected:
     const Body& body;
 
- private:
+private:
     float size;
     Color color;
     float opacity;
     ShaderProperties shadprop;
 };
 
-
 class AxesReferenceMark : public ReferenceMark
 {
- public:
-    AxesReferenceMark(const Body& _body);
+public:
+    explicit AxesReferenceMark(const Body& _body);
 
     void setSize(float _size);
     void setOpacity(float _opacity);
@@ -82,10 +79,10 @@ class AxesReferenceMark : public ReferenceMark
 
     virtual Eigen::Quaterniond getOrientation(double tdb) const = 0;
 
- protected:
+protected:
     const Body& body;
 
- private:
+private:
     float size;
     float opacity;
     ShaderProperties shadprop;
@@ -95,40 +92,40 @@ class AxesReferenceMark : public ReferenceMark
 class BodyAxisArrows : public AxesReferenceMark
 {
 public:
-    BodyAxisArrows(const Body& _body);
-    Eigen::Quaterniond getOrientation(double tdb) const;
+    explicit BodyAxisArrows(const Body& _body);
+    Eigen::Quaterniond getOrientation(double tdb) const override;
 };
 
 
 class FrameAxisArrows : public AxesReferenceMark
 {
 public:
-    FrameAxisArrows(const Body& _body);
-    Eigen::Quaterniond getOrientation(double tdb) const;
+    explicit FrameAxisArrows(const Body& _body);
+    Eigen::Quaterniond getOrientation(double tdb) const override;
 };
 
 
 class SunDirectionArrow : public ArrowReferenceMark
 {
 public:
-    SunDirectionArrow(const Body& _body);
-    Eigen::Vector3d getDirection(double tdb) const;
+    explicit SunDirectionArrow(const Body& _body);
+    Eigen::Vector3d getDirection(double tdb) const override;
 };
 
 
 class VelocityVectorArrow : public ArrowReferenceMark
 {
 public:
-    VelocityVectorArrow(const Body& _body);
-    Eigen::Vector3d getDirection(double tdb) const;
+    explicit VelocityVectorArrow(const Body& _body);
+    Eigen::Vector3d getDirection(double tdb) const override;
 };
 
 
 class SpinVectorArrow : public ArrowReferenceMark
 {
 public:
-    SpinVectorArrow(const Body& _body);
-    Eigen::Vector3d getDirection(double tdb) const;
+    explicit SpinVectorArrow(const Body& _body);
+    Eigen::Vector3d getDirection(double tdb) const override;
 };
 
 
@@ -139,10 +136,8 @@ class BodyToBodyDirectionArrow : public ArrowReferenceMark
 {
 public:
     BodyToBodyDirectionArrow(const Body& _body, const Selection& _target);
-    Eigen::Vector3d getDirection(double tdb) const;
+    Eigen::Vector3d getDirection(double tdb) const override;
 
 private:
     Selection target;
 };
-
-#endif // _CELENGINE_AXISARROW_H_

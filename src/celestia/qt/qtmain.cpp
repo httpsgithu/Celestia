@@ -15,42 +15,51 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <optional>
 
-#include <QTime>
+#include <QtGlobal>
 #include <QApplication>
-#include <QSplashScreen>
+#include <QBitmap>
+#include <QColor>
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
-#include <QPixmap>
-#include <QBitmap>
-#include "qtgettext.h"
-#include <QLocale>
 #include <QLibraryInfo>
-#include <vector>
+#include <QLocale>
+#include <QObject>
+#include <QPixmap>
+#include <QSplashScreen>
+#include <QString>
+#include <QTranslator>
+
+#include <celutil/gettext.h>
+#include <celutil/localeutil.h>
 #include "qtappwin.h"
-#include <qtextcodec.h>
-#include <fmt/printf.h>
+#include "qtcommandline.h"
+#include "qtgettext.h"
 
-using namespace std;
+#ifdef ENABLE_NLS
+namespace
+{
 
-//static const char *description = "Celestia";
+inline void
+bindTextDomainUTF8(const char* domainName, const QString& directory)
+{
+#ifdef _WIN32
+    wbindtextdomain(domainName, directory.toStdWString().c_str());
+#else
+    bindtextdomain(domainName, directory.toUtf8().data());
+#endif
+    bind_textdomain_codeset(domainName, "UTF-8");
+}
 
-// Command line options
-static bool startFullscreen = false;
-static bool runOnce = false;
-static QString startURL;
-static QString logFilename;
-static QString startDirectory;
-static QString startScript;
-static QStringList extrasDirectories;
-static QString configFileName;
-static bool useAlternateConfigFile = false;
-static bool skipSplashScreen = false;
-
-static bool ParseCommandLine();
+} // end unnamed namespace
+#endif
 
 int main(int argc, char *argv[])
 {
+    using namespace celestia::qt;
+
 #ifndef GL_ES
     QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
 #else
@@ -58,10 +67,25 @@ int main(int argc, char *argv[])
 #endif
     QApplication app(argc, argv);
 
-    QTranslator qtTranslator;
-    qtTranslator.load("qt_" + QLocale::system().name(),
-                      QLibraryInfo::location(QLibraryInfo::TranslationsPath));
-    app.installTranslator(&qtTranslator);
+    // Gettext integration
+    CelestiaCore::initLocale();
+#ifdef ENABLE_NLS
+    QString localeDir = LOCALEDIR;
+    bindTextDomainUTF8("celestia", localeDir);
+    bindTextDomainUTF8("celestia-data", localeDir);
+    textdomain("celestia");
+#endif
+
+    if (QTranslator qtTranslator;
+        qtTranslator.load("qt_" + QLocale::system().name(),
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+                          QLibraryInfo::location(QLibraryInfo::TranslationsPath)))
+#else
+                          QLibraryInfo::path(QLibraryInfo::TranslationsPath)))
+#endif
+    {
+        app.installTranslator(&qtTranslator);
+    }
 
     CelestiaQTranslator celestiaTranslator;
     app.installTranslator(&celestiaTranslator);
@@ -69,156 +93,57 @@ int main(int argc, char *argv[])
     Q_INIT_RESOURCE(icons);
 
     QCoreApplication::setOrganizationName("Celestia Development Team");
+    QCoreApplication::setOrganizationDomain("celestiaproject.space");
     QCoreApplication::setApplicationName("Celestia QT");
+    QCoreApplication::setApplicationVersion(VERSION);
 
-    ParseCommandLine();
+    CelestiaCommandLineOptions options = ParseCommandLine(app);
 
-#ifdef NATIVE_OSX_APP
-    // On macOS data directory is in a fixed position relative to the application bundle
-    QDir splashDir(QApplication::applicationDirPath() + "/../Resources/splash");
-#else
-    QDir splashDir(SPLASH_DIR);
-#endif
-    QPixmap pixmap(splashDir.filePath("splash.png"));
-    QSplashScreen splash(pixmap);
-    splash.setMask(pixmap.mask());
+    std::optional<QSplashScreen> splash{std::nullopt};
+    if (!options.skipSplashScreen)
+    {
+        QDir splashDir(CONFIG_DATA_DIR "/splash");
+        if (!options.startDirectory.isEmpty())
+        {
+            QDir newSplashDir = QString("%1/splash").arg(options.startDirectory);
+            if (newSplashDir.exists("splash.png"))
+                splashDir = std::move(newSplashDir);
+        }
 
-    // TODO: resolve issues with pixmap alpha channel
-    splash.show();
-    app.processEvents();
+        QPixmap pixmap(splashDir.filePath("splash.png"));
+        splash.emplace(pixmap);
+        splash->setMask(pixmap.mask());
 
-    // Gettext integration
-    setlocale(LC_ALL, "");
-    setlocale(LC_NUMERIC, "C");
-#ifdef ENABLE_NLS
-#ifdef NATIVE_OSX_APP
-    // On macOS locale directory is in a fixed position relative to the application bundle
-    QString localeDir = QApplication::applicationDirPath() + "/../Resources/locale";
-#else
-    QString localeDir = LOCALEDIR;
-#endif
-    bindtextdomain("celestia", localeDir.toUtf8().data());
-    bind_textdomain_codeset("celestia", "UTF-8");
-    bindtextdomain("celestia_constellations", localeDir.toUtf8().data());
-    bind_textdomain_codeset("celestia_constellations", "UTF-8");
-    textdomain("celestia");
-#endif
+
+        // TODO: resolve issues with pixmap alpha channel
+        splash->show();
+        app.processEvents();
+    }
 
     CelestiaAppWindow window;
 
-    // Connect the splash screen to the main window so that it
-    // can receive progress notifications as Celestia files required
-    // for startup are loaded.
-    QObject::connect(&window, SIGNAL(progressUpdate(const QString&, int, const QColor&)),
-                     &splash, SLOT(showMessage(const QString&, int, const QColor&)));
+    if (splash.has_value())
+    {
+        // Connect the splash screen to the main window so that it
+        // can receive progress notifications as Celestia files required
+        // for startup are loaded.
+        QObject::connect(&window, SIGNAL(progressUpdate(const QString&, int, const QColor&)),
+                         &*splash, SLOT(showMessage(const QString&, int, const QColor&)));
+    }
 
-    window.init(configFileName, extrasDirectories, logFilename);
+    window.init(options);
     window.show();
+    window.startAppCore();
 
-    splash.finish(&window);
+    if (splash.has_value())
+    {
+        splash->finish(&window);
+    }
 
     // Set the main window to be the cel url handler
     QDesktopServices::setUrlHandler("cel", &window, "handleCelUrl");
 
-    return app.exec();
-}
-
-
-
-static void CommandLineError(const char* /*unused*/)
-{
-}
-
-
-
-bool ParseCommandLine()
-{
-    QStringList args = QCoreApplication::arguments();
-
-    int i = 1;
-
-    while (i < args.size())
-    {
-        bool isLastArg = (i == args.size() - 1);
-#if 0
-        if (strcmp(argv[i], "--verbose") == 0)
-        {
-            SetDebugVerbosity(1);
-        }
-        else
-#endif
-        if (args.at(i) == "--fullscreen")
-        {
-            startFullscreen = true;
-        }
-        else if (args.at(i) == "--once")
-        {
-            runOnce = true;
-        }
-        else if (args.at(i) == "--dir")
-        {
-            if (isLastArg)
-            {
-                CommandLineError(_("Directory expected after --dir"));
-                return false;
-            }
-            i++;
-            startDirectory = args.at(i);
-        }
-        else if (args.at(i) == "--conf")
-        {
-            if (isLastArg)
-            {
-                CommandLineError(_("Configuration file name expected after --conf"));
-                return false;
-            }
-            i++;
-            configFileName = args.at(i);
-            useAlternateConfigFile = true;
-        }
-        else if (args.at(i) == "--extrasdir")
-        {
-            if (isLastArg)
-            {
-                CommandLineError(_("Directory expected after --extrasdir"));
-                return false;
-            }
-            i++;
-            extrasDirectories.push_back(args.at(i));
-        }
-        else if (args.at(i) == "-u" || args.at(i) == "--url")
-        {
-            if (isLastArg)
-            {
-                CommandLineError(_("URL expected after --url"));
-                return false;
-            }
-            i++;
-            startURL = args.at(i);
-        }
-        else if (args.at(i) == "-s" || args.at(i) == "--nosplash")
-        {
-            skipSplashScreen = true;
-        }
-        else if (args.at(i) == "-l" || args.at(i) == "--log")
-        {
-            if (isLastArg)
-            {
-                CommandLineError(_("A filename expected after --log/-l"));
-                return false;
-            }
-            i++;
-            logFilename = args.at(i);
-        }
-        else
-        {
-            string buf = fmt::sprintf(_("Invalid command line option '%s'"), args.at(i).toUtf8().data());
-            CommandLineError(buf.c_str());
-            return false;
-        }
-
-        i++;
-    }
-
-    return true;
+    int ret = app.exec();
+    QDesktopServices::unsetUrlHandler("cel");
+    return ret;
 }

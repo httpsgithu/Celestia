@@ -1,24 +1,36 @@
 attribute vec4 in_Position;
-attribute vec4 in_TexCoord0;
-//attribute float in_ColorIndex;
-//attribute float in_Alpha;
+attribute vec2 in_TexCoord0;
+attribute float in_Size;
+attribute float in_ColorIndex;
+attribute float in_Brightness;
 
 uniform sampler2D colorTex;
+
+uniform mat4 m;
+uniform mat3 viewMat;
+
+uniform float size;
+uniform float brightness;
 
 varying vec4 color;
 varying vec2 texCoord;
 
 void main(void)
 {
-    // we pass color index as short int
-    // reusing gl_MultiTexCoord0.z
-    // we use 255 only because we have 256 color indices
-    float t = in_TexCoord0.z / 255.0; // [0, 255] -> [0, 1]
-    // we pass alpha values as as short int
-    // reusing gl_MultiTexCoord0.w
-    // we use 65535 for better precision
-    float a = in_TexCoord0.w / 65535.0; // [0, 65535] -> [0, 1]
-    color = vec4(texture2D(colorTex, vec2(t, 0.0)).rgb, a);
-    texCoord = in_TexCoord0.st;
-    set_vp(in_Position);
+    float s = size * in_Size;
+    vec4 p = m * in_Position;
+    float screenFrac = s / length(p);
+    if (screenFrac >= 0.1)
+    {
+        // Output the same value for all discarded vertices so GPU will discard degenerate triangles
+        gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    vec4 v = vec4(viewMat * vec3(in_TexCoord0.s * 2.0 - 1.0, in_TexCoord0.t * 2.0 - 1.0, 0.0) * s, 0.0);
+    float alpha = (0.1 - screenFrac) * in_Brightness * brightness;
+
+    color = vec4(texture2D(colorTex, vec2(in_ColorIndex, 0.0)).rgb, alpha);
+    texCoord = in_TexCoord0;
+    set_vp(p + v);
 }

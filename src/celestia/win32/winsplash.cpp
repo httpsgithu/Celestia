@@ -10,33 +10,28 @@
 // of the License, or (at your option) any later version.
 
 #include "winsplash.h"
+
+#include <fmt/format.h>
+#ifdef _UNICODE
+#include <fmt/xchar.h>
+#endif
+
+#include <celimage/image.h>
 #include <celutil/gettext.h>
-#include <celutil/winutil.h>
-#include <string>
-#include <winuser.h>
-#include <commctrl.h>
 #include "res/resource.h"
-#include <iostream>
+#include "tstring.h"
+#include "winuiutils.h"
 
+namespace celestia::win32
+{
 
-using namespace std;
+namespace
+{
 
+constexpr const TCHAR className[] = TEXT("CELSPLASH");
 
-// Required for transparent Windows, but not present in VC6 headers. Only present
-// on Win2k or later.
-typedef BOOL (WINAPI *lpfnSetLayeredWindowAttributes)
-        (HWND hWnd, COLORREF cr, BYTE bAlpha, DWORD dwFlags);
-typedef BOOL (WINAPI *lpfnUpdateLayeredWindow)
-        (HWND hwnd, HDC hdcDst, POINT* pptDst, SIZE* psize,
-         HDC hdcSrc, POINT* pptSrc, COLORREF crKey, BLENDFUNCTION* pblend,
-         DWORD dwFlags);
-
-lpfnSetLayeredWindowAttributes winSetLayeredWindowAttributes = NULL;
-lpfnUpdateLayeredWindow        winUpdateLayeredWindow = NULL;
-
-#define WS_EX_LAYERED 0x00080000
-
-static LRESULT CALLBACK SplashWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK
+SplashWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     static SplashWindow *splash = NULL;
 
@@ -51,21 +46,13 @@ static LRESULT CALLBACK SplashWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARA
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+} // end unnamed namespace
 
-SplashWindow::SplashWindow(const string& _imageFileName) :
-    hwnd(NULL),
-    className(NULL),
-    imageFileName(_imageFileName),
-    image(NULL),
-    hBitmap(0),
-    hCompositionBitmap(0),
-    useLayeredWindow(false),
-    winWidth(640),
-    winHeight(480)
+SplashWindow::SplashWindow(const fs::path& _imageFileName) :
+    imageFileName(_imageFileName)
 {
     init();
 }
-
 
 SplashWindow::~SplashWindow()
 {
@@ -75,26 +62,17 @@ SplashWindow::~SplashWindow()
         ::DeleteObject(hCompositionBitmap);
 }
 
-
 LRESULT CALLBACK
 SplashWindow::windowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     switch (uMsg)
     {
         case WM_PAINT:
-            if (!useLayeredWindow)
-            {
-                PAINTSTRUCT ps;
-                HDC hDC = BeginPaint(hwnd, &ps);
-                paint(hDC);
-                EndPaint(hwnd, &ps);
-            }
             return TRUE;
     }
 
-    return DefWindowProc (hwnd, uMsg, wParam, lParam) ;
+    return DefWindowProc(hwnd, uMsg, wParam, lParam) ;
 }
-
 
 void
 SplashWindow::paint(HDC hDC)
@@ -105,10 +83,10 @@ SplashWindow::paint(HDC hDC)
     if (hBitmap)
     {
         // Display the splash image
-        HDC hMemDC      = ::CreateCompatibleDC(hDC);
-        HBITMAP hOldBitmap = (HBITMAP) ::SelectObject(hMemDC, hBitmap);
+        HDC hMemDC = ::CreateCompatibleDC(hDC);
+        auto hOldBitmap = static_cast<HBITMAP>(::SelectObject(hMemDC, hBitmap));
 
-        BitBlt(hDC, 0, 0, winWidth, winHeight, hMemDC, 0, 0, SRCCOPY);
+        StretchBlt(hDC, 0, 0, winWidth, winHeight, hMemDC, 0, 0, imageWidth, imageHeight, SRCCOPY);
 
         ::SelectObject(hMemDC, hOldBitmap);
         ::DeleteDC(hMemDC);
@@ -126,71 +104,52 @@ SplashWindow::paint(HDC hDC)
 
     // Show the message text
     RECT r;
-    r.left   = rect.right - 250;
-    r.top    = rect.bottom - 70;
+    r.left   = rect.right - DpToPixels(250, hwnd);
+    r.top    = rect.bottom - DpToPixels(70, hwnd);
     r.right  = rect.right;
-    r.bottom = r.top + 30;
+    r.bottom = r.top + DpToPixels(30, hwnd);
 
     HFONT hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     SelectObject(hDC, hFont);
- //   string s;
- //   s += UTF8ToCurrentCP(_("Version: "));
-    string text = UTF8ToCurrentCP(_("Version: ")) + string(VERSION_STRING "\n") + message;
-    DrawText(hDC, text.c_str(), text.length(), &r, DT_LEFT | DT_VCENTER);
+    DrawText(hDC, message.data(), message.size(), &r, DT_LEFT | DT_VCENTER);
 }
-
 
 void
 SplashWindow::init()
 {
     hwnd = NULL;
-    className = TEXT("CELSPLASH");
 
-    //  Get the function pointer for SetLayeredWindowAttributes
-    HMODULE user32 = GetModuleHandle(TEXT("USER32.DLL"));
-
-    winSetLayeredWindowAttributes = (lpfnSetLayeredWindowAttributes) GetProcAddress(user32, "SetLayeredWindowAttributes");
-    winUpdateLayeredWindow = (lpfnUpdateLayeredWindow) GetProcAddress(user32, "UpdateLayeredWindow");
-
-    if (winSetLayeredWindowAttributes != NULL && winUpdateLayeredWindow != NULL)
-        useLayeredWindow = true;
-
-    image = LoadImageFromFile(imageFileName);
+    versionString = UTF8ToTString(fmt::format(_("Version: {}"), VERSION_STRING));
+    message = versionString + TEXT('\n');
+    image = engine::Image::load(imageFileName);
 }
-
 
 void
 SplashWindow::updateWindow()
 {
-    // If we're using layered windows, draw into the compositing bitmap and use it to
-    // as the source for UpdateLayeredWindow. Otherwise, we use the traditional approach
-    // and send a paint message to the window.
-    if (useLayeredWindow)
-    {
-        HDC hwndDC = GetDC(hwnd);
-        HDC hDC = CreateCompatibleDC(hwndDC);
+    // Draw into the compositing bitmap and use it as the source for UpdateLayeredWindow.
+    HDC hwndDC = GetDC(hwnd);
+    HDC hDC = CreateCompatibleDC(hwndDC);
 
-        HBITMAP hOldBitmap = (HBITMAP) ::SelectObject(hDC, hCompositionBitmap);
-        paint(hDC);
+    auto hOldBitmap = static_cast<HBITMAP>(::SelectObject(hDC, hCompositionBitmap));
+    paint(hDC);
 
-        SIZE size;
-        POINT origin = { 0, 0 };
-        size.cx = winWidth;
-        size.cy = winHeight;
-        BLENDFUNCTION blend;
-        blend.BlendOp = AC_SRC_OVER;
-        blend.BlendFlags = 0;
-        blend.AlphaFormat = AC_SRC_ALPHA;
-        blend.SourceConstantAlpha = 0xff;
-        winUpdateLayeredWindow(hwnd, hwndDC, NULL, &size, hDC, &origin, 0, &blend, ULW_ALPHA);
+    SIZE size;
+    POINT origin = { 0, 0 };
+    size.cx = winWidth;
+    size.cy = winHeight;
+    BLENDFUNCTION blend;
+    blend.BlendOp = AC_SRC_OVER;
+    blend.BlendFlags = 0;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+    blend.SourceConstantAlpha = 0xff;
+    UpdateLayeredWindow(hwnd, hwndDC, NULL, &size, hDC, &origin, 0, &blend, ULW_ALPHA);
 
-        ::SelectObject(hDC, hOldBitmap);
-        ::DeleteDC(hDC);
-    }
+    ::SelectObject(hDC, hOldBitmap);
+    ::DeleteDC(hDC);
 
     ::UpdateWindow(hwnd);
 }
-
 
 HWND
 SplashWindow::createWindow()
@@ -204,7 +163,7 @@ SplashWindow::createWindow()
     wndclass.hInstance      = ::GetModuleHandle(NULL);
     wndclass.hIcon          = NULL;
     wndclass.hCursor        = ::LoadCursor( NULL, IDC_WAIT );
-    wndclass.hbrBackground  = (HBRUSH)::GetStockObject(LTGRAY_BRUSH);
+    wndclass.hbrBackground  = static_cast<HBRUSH>(::GetStockObject(LTGRAY_BRUSH));
     wndclass.lpszMenuName   = NULL;
     wndclass.lpszClassName  = className;
     wndclass.hIconSm        = NULL;
@@ -212,15 +171,18 @@ SplashWindow::createWindow()
     if (!RegisterClassEx(&wndclass))
         return NULL;
 
-    if (image != NULL)
+    if (image != nullptr)
     {
-        winWidth = image->getWidth();
-        winHeight = image->getHeight();
+        imageWidth = image->getWidth();
+        imageHeight = image->getHeight();
+
+        winWidth = DpToPixels(imageWidth, nullptr);
+        winHeight = DpToPixels(imageHeight, nullptr);
     }
 
     // Create the application window centered in the middle of the screen
-    DWORD nScrWidth  = ::GetSystemMetrics(SM_CXFULLSCREEN);
-    DWORD nScrHeight = ::GetSystemMetrics(SM_CYFULLSCREEN);
+    DWORD nScrWidth  = GetSystemMetricsForWindow(SM_CXFULLSCREEN, nullptr);
+    DWORD nScrHeight = GetSystemMetricsForWindow(SM_CYFULLSCREEN, nullptr);
 
     int x = (nScrWidth  - winWidth) / 2;
     int y = (nScrHeight - winHeight) / 2;
@@ -232,23 +194,16 @@ SplashWindow::createWindow()
     {
         createBitmap();
 
-        // If this version of Windows supports layered windows, set the window
-        // style to layered.
-        if (useLayeredWindow)
-        {
-            SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-        }
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, GetWindowLongPtr(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
 
         ShowWindow(hwnd, SW_SHOW);
         updateWindow();
     }
 
-    delete image;
-    image = NULL;
+    image.reset();
 
     return hwnd;
 }
-
 
 bool
 SplashWindow::createBitmap()
@@ -304,7 +259,7 @@ SplashWindow::createBitmap()
         // layered window support.)
         if (hBitmap)
         {
-            hCompositionBitmap = CreateCompatibleBitmap(hwndDC, image->getWidth(), image->getHeight());
+            hCompositionBitmap = CreateCompatibleBitmap(hwndDC, winWidth, winHeight);
         }
     }
 
@@ -312,7 +267,8 @@ SplashWindow::createBitmap()
 }
 
 
-int SplashWindow::messageLoop()
+int
+SplashWindow::messageLoop()
 {
     if (!hwnd)
         showSplash();
@@ -324,29 +280,31 @@ int SplashWindow::messageLoop()
         DispatchMessage(&msg);
     }
 
-    return msg.wParam ;
+    return msg.wParam;
 }
 
 
 // Redraw the window with a new text message
-void SplashWindow::setMessage(const string& msg)
+void
+SplashWindow::setMessage(std::string_view msg)
 {
-    message = msg;
+    message = fmt::format(TEXT("{}\n{}"), versionString, UTF8ToTString(msg));
     InvalidateRect(hwnd, NULL, FALSE);
     updateWindow();
 }
 
 
-void SplashWindow::showSplash()
+void
+SplashWindow::showSplash()
 {
     close();
     createWindow();
 }
 
 
-int SplashWindow::close()
+int
+SplashWindow::close()
 {
-
     if (hwnd)
     {
         DestroyWindow(hwnd);
@@ -357,3 +315,5 @@ int SplashWindow::close()
 
     return 0;
 }
+
+} // end namespace celestia::win32

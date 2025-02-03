@@ -10,25 +10,16 @@
  *  $Id: dialog-solar.h,v 1.1 2005-12-06 03:19:35 suwalski Exp $
  */
 
-#ifndef GTK_DIALOG_SOLAR_H
-#define GTK_DIALOG_SOLAR_H
+#pragma once
 
 #include <gtk/gtk.h>
 
-#include <celengine/body.h>
-
 #include "common.h"
 
+namespace celestia::gtk
+{
 
 /* Entry Function */
 void dialogSolarBrowser(AppData* app);
 
-
-/* Local Data */
-static const char * const ssTitles[] =
-{
-    "Name",
-    "Type"
-};
-
-#endif /* GTK_DIALOG_SOLAR_H */
+} // end namespace celestia::gtk

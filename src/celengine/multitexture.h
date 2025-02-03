@@ -7,35 +7,37 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_MULTITEXTURE_H_
-#define _CELENGINE_MULTITEXTURE_H_
+#pragma once
 
 #include <string>
-#include "texture.h"
+
+#include <celcompat/filesystem.h>
 #include <celutil/reshandle.h>
 
-#define TEXTURE_RESOLUTION 3
-
-enum {
+enum
+{
     lores  = 0,
     medres = 1,
     hires  = 2
 };
 
+class Texture;
 
 class MultiResTexture
 {
- public:
+public:
+    static constexpr int kTextureResolution = 3;
+
     MultiResTexture();
     MultiResTexture(ResourceHandle loTex,
                     ResourceHandle medTex = InvalidResource,
                     ResourceHandle hiTex = InvalidResource);
-    MultiResTexture(const std::string& source, const fs::path& path);
-    ~MultiResTexture() {};
-    void setTexture(const std::string& source,
+    MultiResTexture(const fs::path& source, const fs::path& path);
+
+    void setTexture(const fs::path& source,
                     const fs::path& path,
                     unsigned int flags = 0);
-    void setTexture(const std::string& source,
+    void setTexture(const fs::path& source,
                     const fs::path& path,
                     float bumpHeight,
                     unsigned int flags);
@@ -43,8 +45,5 @@ class MultiResTexture
 
     bool isValid() const;
 
- public:
-    ResourceHandle tex[3];
+    ResourceHandle tex[kTextureResolution];
 };
-
-#endif // _CELENGINE_MULTITEXTURE_H_

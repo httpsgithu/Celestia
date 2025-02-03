@@ -10,75 +10,176 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <map>
-#include <celcompat/filesystem.h>
-#include <celmath/mathlib.h>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <Eigen/Core>
 #include <Eigen/Geometry>
+
+#include <celcompat/filesystem.h>
 
 
 class Color;
 class Value;
 
-using HashIterator = std::map<std::string, Value*>::const_iterator;
-
 class AssociativeArray
 {
  public:
+    using AssocType = std::map<std::string, std::size_t, std::less<>>;
+
     AssociativeArray() = default;
     ~AssociativeArray();
-    AssociativeArray(AssociativeArray&&) = default;
+    AssociativeArray(AssociativeArray&&) = delete;
     AssociativeArray(const AssociativeArray&) = delete;
-    AssociativeArray& operator=(AssociativeArray&&) = default;
+    AssociativeArray& operator=(AssociativeArray&&) = delete;
     AssociativeArray& operator=(AssociativeArray&) = delete;
 
-    Value* getValue(const std::string&) const;
-    void addValue(const std::string&, Value&);
+    const Value* getValue(std::string_view) const;
+    void addValue(std::string&&, Value&&);
 
-    bool getNumber(const std::string&, double&) const;
-    bool getNumber(const std::string&, float&) const;
-    bool getNumber(const std::string&, int&) const;
-    bool getNumber(const std::string&, uint32_t&) const;
-    bool getString(const std::string&, std::string&) const;
-    bool getPath(const std::string&, fs::path&) const;
-    bool getBoolean(const std::string&, bool&) const;
-    bool getVector(const std::string&, Eigen::Vector3d&) const;
-    bool getVector(const std::string&, Eigen::Vector3f&) const;
-    bool getVector(const std::string&, Eigen::Vector4d&) const;
-    bool getVector(const std::string&, Eigen::Vector4f&) const;
-    bool getRotation(const std::string&, Eigen::Quaternionf&) const;
-    bool getColor(const std::string&, Color&) const;
-    bool getAngle(const std::string&, double&, double = 1.0, double = 0.0) const;
-    bool getAngle(const std::string&, float&, double = 1.0, double = 0.0) const;
-    bool getLength(const std::string&, double&, double = 1.0, double = 0.0) const;
-    bool getLength(const std::string&, float&, double = 1.0, double = 0.0) const;
-    bool getTime(const std::string&, double&, double = 1.0, double = 0.0) const;
-    bool getTime(const std::string&, float&, double = 1.0, double = 0.0) const;
-    bool getMass(const std::string&, double&, double = 1.0, double = 0.0) const;
-    bool getMass(const std::string&, float&, double = 1.0, double = 0.0) const;
-    bool getLengthVector(const std::string&, Eigen::Vector3d&, double = 1.0, double = 0.0) const;
-    bool getLengthVector(const std::string&, Eigen::Vector3f&, double = 1.0, double = 0.0) const;
-    bool getSphericalTuple(const std::string&, Eigen::Vector3d&) const;
-    bool getSphericalTuple(const std::string&, Eigen::Vector3f&) const;
-    bool getAngleScale(const std::string&, double&) const;
-    bool getAngleScale(const std::string&, float&) const;
-    bool getLengthScale(const std::string&, double&) const;
-    bool getLengthScale(const std::string&, float&) const;
-    bool getTimeScale(const std::string&, double&) const;
-    bool getTimeScale(const std::string&, float&) const;
-    bool getMassScale(const std::string&, double&) const;
-    bool getMassScale(const std::string&, float&) const;
-
-    HashIterator begin() const
+    template<typename T, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
+    std::optional<T> getNumber(std::string_view key) const
     {
-        return assoc.begin();
+        auto number = getNumberImpl(key);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return number;
+        else
+            return convertNumeric<T>(number);
     }
-    HashIterator end() const
+
+    const std::string* getString(std::string_view) const;
+    std::optional<fs::path> getPath(std::string_view) const;
+    std::optional<bool> getBoolean(std::string_view) const;
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<Eigen::Matrix<T, 3, 1>> getVector3(std::string_view key) const
     {
-        return assoc.end();
+        auto vec3 = getVector3Impl(key);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return vec3;
+        else
+            return convertMatrix<T>(vec3);
+    }
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<Eigen::Matrix<T, 4, 1>> getVector4(std::string_view key) const
+    {
+        auto vec4 = getVector4Impl(key);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return vec4;
+        else
+            return convertMatrix<T>(vec4);
+    }
+
+    std::optional<Eigen::Quaternionf> getRotation(std::string_view) const;
+
+    std::optional<Color> getColor(std::string_view) const;
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<T> getAngle(std::string_view key, double outputScale = 1.0, double defaultScale = 0.0) const
+    {
+        auto angle = getAngleImpl(key, outputScale, defaultScale);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return angle;
+        else
+            return convertNumeric<T>(angle);
+    }
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<T> getLength(std::string_view key, double outputScale = 1.0, double defaultScale = 0.0) const
+    {
+        auto length = getLengthImpl(key, outputScale, defaultScale);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return length;
+        else
+            return convertNumeric<T>(length);
+    }
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<T> getTime(std::string_view key, double outputScale = 1.0, double defaultScale = 0.0) const
+    {
+        auto time = getTimeImpl(key, outputScale, defaultScale);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return time;
+        else
+            return convertNumeric<T>(time);
+    }
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<T> getMass(std::string_view key, double outputScale = 1.0, double defaultScale = 0.0) const
+    {
+        auto mass = getMassImpl(key, outputScale, defaultScale);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return mass;
+        else
+            return convertNumeric<T>(mass);
+    }
+
+    template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    std::optional<Eigen::Matrix<T, 3, 1>> getLengthVector(std::string_view key,
+                                                          double outputScale = 1.0,
+                                                          double defaultScale = 0.0) const
+    {
+        auto vec = getLengthVectorImpl(key, outputScale, defaultScale);
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, double>)
+            return vec;
+        else
+            return convertMatrix<T>(vec);
+    }
+
+    std::optional<Eigen::Vector3d> getSphericalTuple(std::string_view) const;
+
+    template<typename T>
+    void for_all(T action) const
+    {
+        for (const auto& [key, value] : assoc)
+        {
+            action(key, values[value]);
+        }
     }
 
  private:
-    std::map<std::string, Value*> assoc;
+    // At this point, Value is an incomplete type. C++17 allows us to store
+    // this in a vector but not a map, so use the map to store vector indices
+    std::vector<Value> values;
+    AssocType assoc;
+
+    std::optional<double> getNumberImpl(std::string_view) const;
+    std::optional<Eigen::Vector3d> getVector3Impl(std::string_view) const;
+    std::optional<Eigen::Vector4d> getVector4Impl(std::string_view) const;
+
+    std::optional<double> getAngleImpl(std::string_view, double, double) const;
+    std::optional<double> getLengthImpl(std::string_view, double, double) const;
+    std::optional<double> getTimeImpl(std::string_view, double, double) const;
+    std::optional<double> getMassImpl(std::string_view, double, double) const;
+
+    std::optional<Eigen::Vector3d> getLengthVectorImpl(std::string_view, double, double) const;
+
+    template<typename T, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
+    inline static std::optional<T>
+    convertNumeric(const std::optional<double>& maybeDouble)
+    {
+        return maybeDouble.has_value()
+            ? std::optional<T>{ static_cast<T>(*maybeDouble) }
+            : std::nullopt;
+    }
+
+    template<typename T, int X, int Y,
+             std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+    inline static std::optional<Eigen::Matrix<T, X, Y>>
+    convertMatrix(const std::optional<Eigen::Matrix<double, X, Y>>& maybeMatrix)
+    {
+        return maybeMatrix.has_value()
+            ? std::make_optional<Eigen::Matrix<T, X, Y>>(maybeMatrix->template cast<T>())
+            : std::nullopt;
+    }
 };
 
 using Hash = AssociativeArray;

@@ -1,4 +1,4 @@
-// cmoddview - An application for previewing cmod and other 3D file formats
+// cmodview - An application for previewing cmod and other 3D file formats
 // supported by Celestia.
 //
 // Copyright (C) 2010, Chris Laurel <claurel@gmail.com>
@@ -10,23 +10,25 @@
 
 #include "mainwindow.h"
 #include <QApplication>
-#include <QGLFormat>
+#include <QSurfaceFormat>
+#include <celutil/logger.h>
 
+using celestia::util::CreateLogger;
 
 int
 main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
-    QCoreApplication::setOrganizationName("Celestia");
-    QCoreApplication::setOrganizationDomain("shatters.net");
+    QCoreApplication::setOrganizationName("Celestia Development Team");
+    QCoreApplication::setOrganizationDomain("celestiaproject.space");
     QCoreApplication::setApplicationName("cmodview");
 
     // Enable multisample antialiasing
-    QGLFormat format;
-    format.setSampleBuffers(true);
+    QSurfaceFormat format;
     format.setSamples(4);
-    QGLFormat::setDefaultFormat(format);
+    format.setVersion(2, 0);
+    QSurfaceFormat::setDefaultFormat(format);
 
     QStringList arguments = app.arguments();
     QString fileName;
@@ -35,7 +37,9 @@ main(int argc, char *argv[])
         fileName = arguments.at(1);
     }
 
-    MainWindow window;
+    CreateLogger();
+
+    cmodview::MainWindow window;
 
     window.resize(QSize(800, 600));
     window.readSettings();
@@ -50,6 +54,7 @@ main(int argc, char *argv[])
     // Install an event filter so that the main window can take care of file
     // open events.
     app.installEventFilter(&window);
+
 
     return app.exec();
 }

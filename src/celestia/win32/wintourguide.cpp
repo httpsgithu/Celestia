@@ -9,21 +9,26 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#include <string>
-#include <sstream>
-#include <algorithm>
-#include <set>
-#include <windows.h>
-#include <commctrl.h>
 #include "wintourguide.h"
 
-#include <celutil/winutil.h>
+#include <Eigen/Core>
+
+#include <commctrl.h>
+
+#include <celengine/observer.h>
+#include <celengine/simulation.h>
+#include <celengine/selection.h>
+#include <celestia/celestiacore.h>
+#include <celestia/destination.h>
 
 #include "res/resource.h"
+#include "tstring.h"
 
-using namespace Eigen;
-using namespace std;
+namespace celestia::win32
+{
 
+namespace
+{
 
 BOOL APIENTRY TourGuideProc(HWND hDlg,
                             UINT message,
@@ -49,23 +54,21 @@ BOOL APIENTRY TourGuideProc(HWND hDlg,
             {
                 Destination* dest = (*destinations)[0];
                 guide->selectedDest = dest;
-                for (DestinationList::const_iterator iter = destinations->begin();
-                     iter != destinations->end(); iter++)
+                for (Destination* dest : *destinations)
                 {
-                    Destination* dest = *iter;
-                    if (dest != NULL)
-                    {
-                        SendMessage(hwnd, CB_INSERTSTRING, -1,
-                                    reinterpret_cast<LPARAM>(UTF8ToCurrentCP(dest->name).c_str()));
-                    }
+                    if (dest == nullptr)
+                        continue;
+
+                    SendMessage(hwnd, CB_INSERTSTRING, -1,
+                                reinterpret_cast<LPARAM>(UTF8ToTString(dest->name).c_str()));
                 }
 
-                if (destinations->size() > 0)
+                if (!destinations->empty())
                 {
                     SendMessage(hwnd, CB_SETCURSEL, 0, 0);
                     SetDlgItemText(hDlg,
                                    IDC_TEXT_DESCRIPTION,
-                                   UTF8ToCurrentCP((*destinations)[0]->description).c_str());
+                                   UTF8ToTString(destinations->front()->description).c_str());
                 }
             }
         }
@@ -104,15 +107,15 @@ BOOL APIENTRY TourGuideProc(HWND hDlg,
                     {
                         // Use the default distance
                         sim->gotoSelection(5.0,
-                                           Vector3f::UnitY(),
-                                           ObserverFrame::ObserverLocal);
+                                           Eigen::Vector3f::UnitY(),
+                                           ObserverFrame::CoordinateSystem::ObserverLocal);
                     }
                     else
                     {
                         sim->gotoSelection(5.0,
                                            tourGuide->selectedDest->distance,
-                                           Vector3f::UnitY(),
-                                           ObserverFrame::ObserverLocal);
+                                           Eigen::Vector3f::UnitY(),
+                                           ObserverFrame::CoordinateSystem::ObserverLocal);
                     }
                 }
             }
@@ -129,7 +132,7 @@ BOOL APIENTRY TourGuideProc(HWND hDlg,
                     Destination* dest = (*destinations)[item];
                     SetDlgItemText(hDlg,
                                    IDC_TEXT_DESCRIPTION,
-                                   UTF8ToCurrentCP(dest->description).c_str());
+                                   UTF8ToTString(dest->description).c_str());
                     tourGuide->selectedDest = dest;
                 }
             }
@@ -139,6 +142,8 @@ BOOL APIENTRY TourGuideProc(HWND hDlg,
 
     return FALSE;
 }
+
+} // end unnamed namespace
 
 
 TourGuide::TourGuide(HINSTANCE appInstance,
@@ -154,3 +159,5 @@ TourGuide::TourGuide(HINSTANCE appInstance,
                              (DLGPROC)TourGuideProc,
                              reinterpret_cast<LONG_PTR>(this));
 }
+
+} // end namespace celestia::win32

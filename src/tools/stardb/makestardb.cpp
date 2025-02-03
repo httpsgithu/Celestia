@@ -14,12 +14,13 @@
 #include <iomanip>
 #include <cctype>
 #include <cassert>
+#include <celastro/astro.h>
 #include <celutil/bytes.h>
-#include <celengine/astro.h>
 #include <celengine/star.h>
 
 using namespace std;
 
+namespace astro = celestia::astro;
 
 static string inputFilename;
 static string outputFilename;
@@ -84,25 +85,25 @@ bool parseCommandLine(int argc, char* argv[])
 static void writeUint(ostream& out, uint32_t n)
 {
     LE_TO_CPU_INT32(n, n);
-    out.write(reinterpret_cast<char*>(&n), sizeof n);
+    out.write(reinterpret_cast<const char*>(&n), sizeof n);
 }
 
 static void writeFloat(ostream& out, float f)
 {
     LE_TO_CPU_FLOAT(f, f);
-    out.write(reinterpret_cast<char*>(&f), sizeof f);
+    out.write(reinterpret_cast<const char*>(&f), sizeof f);
 }
 
 static void writeUshort(ostream& out, uint16_t n)
 {
     LE_TO_CPU_INT16(n, n);
-    out.write(reinterpret_cast<char*>(&n), sizeof n);
+    out.write(reinterpret_cast<const char*>(&n), sizeof n);
 }
 
 static void writeShort(ostream& out, int16_t n)
 {
     LE_TO_CPU_INT16(n, n);
-    out.write(reinterpret_cast<char*>(&n), sizeof n);
+    out.write(reinterpret_cast<const char*>(&n), sizeof n);
 }
 
 

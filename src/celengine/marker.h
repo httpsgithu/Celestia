@@ -7,8 +7,7 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef CELENGINE_MARKER_H_
-#define CELENGINE_MARKER_H_
+#pragma once
 
 #include <vector>
 #include <string>
@@ -40,20 +39,16 @@ public:
         Crosshair  = 12,
     };
 
-    MarkerRepresentation(Symbol symbol = MarkerRepresentation::Diamond,
-                         float size = 10.0f,
-                         Color color = Color::White,
-                         std::string label = {}) :
+    explicit MarkerRepresentation(Symbol symbol = MarkerRepresentation::Diamond,
+                                  float size = 10.0f,
+                                  Color color = Color::White,
+                                  std::string label = {}) :
         m_symbol(symbol),
         m_size(size),
         m_color(color),
         m_label(std::move(label))
     {
     }
-
-    MarkerRepresentation(const MarkerRepresentation& rep);
-
-    MarkerRepresentation& operator=(const MarkerRepresentation& rep);
 
     Symbol symbol() const { return m_symbol; }
     Color color() const { return m_color; }
@@ -119,5 +114,3 @@ class Marker
 
 typedef std::vector<Marker> MarkerList;
 }
-
-#endif // CELENGINE_MARKER_H_

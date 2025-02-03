@@ -16,6 +16,8 @@
 #define NC_(c, s) s
 #endif
 
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "celestia.exe.manifest"
+
 //
 // Bitmap resources
 //
@@ -165,6 +167,7 @@ IDR_MAIN_MENU MENU
         {
             MENUITEM "Placeholder", ID_FIRST_SCRIPT
         }
+        MENUITEM "Run &Demo", ID_FILE_RUNDEMO
         MENUITEM SEPARATOR
         MENUITEM "Capture &Image...\tF10", ID_FILE_CAPTUREIMAGE
         MENUITEM "Capture &Movie...\tShift+F10", ID_FILE_CAPTUREMOVIE
@@ -218,8 +221,10 @@ IDR_MAIN_MENU MENU
         }
         POPUP "Star &Color"
         {
-            MENUITEM "&Disabled", ID_STARCOLOR_DISABLED, CHECKED
-            MENUITEM "&Enabled", ID_STARCOLOR_ENABLED
+            MENUITEM "Blackbody D65", ID_STARCOLOR_D65, CHECKED
+            MENUITEM "Blackbody (Solar Whitepoint)", ID_STARCOLOR_SOLAR
+            MENUITEM "Blackbody (Vega Whitepoint)", ID_STARCOLOR_VEGA
+            MENUITEM "Classic colors", ID_STARCOLOR_CLASSIC
         }
         MENUITEM SEPARATOR
         POPUP "&Ambient Light"
@@ -253,8 +258,6 @@ IDR_MAIN_MENU MENU
     }
     POPUP "&Help"
     {
-        MENUITEM "Run &Demo", ID_HELP_RUNDEMO
-        MENUITEM SEPARATOR
         MENUITEM "User &Guide", ID_HELP_GUIDE
         MENUITEM "&Controls", ID_HELP_CONTROLS
         MENUITEM "&OpenGL Info", ID_HELP_GLINFO
@@ -280,7 +283,7 @@ FONT 8, "Segoe UI", 0, 0, 0
     LTEXT           "Celestia", IDC_STATIC, 56, 17, 30, 9, SS_LEFT, WS_EX_LEFT
     LTEXT           "1.7.0", IDC_STATIC, 90, 17, 40, 9, SS_LEFT, WS_EX_LEFT
     LTEXT           "Copyright (C) 2001-2021, Celestia Development Team", IDC_STATIC, 56, 26, 247, 9, SS_LEFT, WS_EX_LEFT
-    LTEXT           "https://celestia.space/", IDC_CELESTIALINK, 56, 43, 150, 9, SS_LEFT, WS_EX_LEFT
+    LTEXT           CELESTIA_URL, IDC_CELESTIALINK, 56, 43, 150, 9, SS_LEFT, WS_EX_LEFT
     LTEXT           "Celestia is free software and comes with absolutely no warranty.", IDC_STATIC, 56, 66, 247, 17, SS_LEFT, WS_EX_LEFT
     LTEXT           "Authors", IDC_STATIC, 56, 90, 100, 9, SS_LEFT, WS_EX_LEFT
     LTEXT           "Chris Laurel", IDC_STATIC, 56, 102, 100, 9, SS_LEFT, WS_EX_LEFT
@@ -488,9 +491,9 @@ FONT 8, "Segoe UI", 0, 0, 0
     COMBOBOX        IDC_COMBO_MOVIE_SIZE, 38, 2, 82, 93, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, WS_EX_LEFT
     RTEXT           "Frame rate:", IDC_STATIC, 120, 4, 74, 8, SS_RIGHT, WS_EX_LEFT
     COMBOBOX        IDC_COMBO_MOVIE_FRAMERATE, 196, 2, 82, 90, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, WS_EX_LEFT
-    LTEXT           "Codec:", 0, 6, 20, 30, 8, SS_LEFT, WS_EX_LEFT
-    COMBOBOX        IDC_COMBO_MOVIE_CODEC, 38, 18, 82, 30, CBS_DROPDOWNLIST | CBS_HASSTRINGS, WS_EX_LEFT
-    RTEXT           "Bitrate:", 0, 120, 20, 74, 8, SS_RIGHT, WS_EX_LEFT
+    LTEXT           "Codec:", IDC_STATIC, 6, 20, 30, 8, SS_LEFT, WS_EX_LEFT
+    COMBOBOX        IDC_COMBO_MOVIE_CODEC, 38, 18, 82, 90, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, WS_EX_LEFT
+    RTEXT           "Bitrate:", IDC_STATIC, 120, 20, 74, 8, SS_RIGHT, WS_EX_LEFT
     EDITTEXT        IDC_EDIT_MOVIE_BITRATE, 196, 18, 82, 14, ES_AUTOHSCROLL | ES_NUMBER, WS_EX_LEFT
 }
 
@@ -590,17 +593,17 @@ FONT 8, "Segoe UI", 0, 0, 1
 
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
-IDD_TOURGUIDE DIALOGEX 0, 0, 240, 145
+IDD_TOURGUIDE DIALOGEX 0, 0, 240, 195
 STYLE DS_MODALFRAME | DS_SETFONT | WS_CAPTION | WS_VISIBLE | WS_POPUP | WS_SYSMENU
 CAPTION "Tour Guide"
 FONT 8, "Segoe UI", 0, 0, 0
 {
     CONTROL         "", -1, WC_NATIVEFONTCTL, NFS_ALL, 0, 0, 0, 0
-    DEFPUSHBUTTON   "OK", IDOK, 173, 124, 60, 14, 0, WS_EX_LEFT
+    DEFPUSHBUTTON   "OK", IDOK, 173, 174, 60, 14, 0, WS_EX_LEFT
     PUSHBUTTON      "Go To", IDC_BUTTON_GOTO, 173, 20, 60, 14, 0, WS_EX_LEFT
     COMBOBOX        IDC_COMBO_TOURGUIDE, 7, 21, 131, 90, WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWN, WS_EX_LEFT
     LTEXT           "Select your destination:", IDC_STATIC, 7, 9, 147, 8, SS_LEFT, WS_EX_LEFT
-    LTEXT           "", IDC_TEXT_DESCRIPTION, 7, 42, 162, 97, SS_LEFT, WS_EX_LEFT
+    LTEXT           "", IDC_TEXT_DESCRIPTION, 7, 42, 162, 147, SS_LEFT, WS_EX_LEFT
 }
 
 

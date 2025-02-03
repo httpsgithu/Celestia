@@ -8,11 +8,8 @@
 // of the License, or (at your option) any later version.
 
 #include "multitexture.h"
+
 #include "texmanager.h"
-#include <celutil/debug.h>
-
-using namespace std;
-
 
 MultiResTexture::MultiResTexture()
 {
@@ -32,14 +29,14 @@ MultiResTexture::MultiResTexture(ResourceHandle loTex,
 }
 
 
-MultiResTexture::MultiResTexture(const string& source,
+MultiResTexture::MultiResTexture(const fs::path& source,
                                  const fs::path& path)
 {
     setTexture(source, path);
 }
 
 
-void MultiResTexture::setTexture(const string& source,
+void MultiResTexture::setTexture(const fs::path& source,
                                  const fs::path& path,
                                  unsigned int flags)
 {
@@ -50,7 +47,7 @@ void MultiResTexture::setTexture(const string& source,
 }
 
 
-void MultiResTexture::setTexture(const string& source,
+void MultiResTexture::setTexture(const fs::path& source,
                                  const fs::path& path,
                                  float bumpHeight,
                                  unsigned int flags)

@@ -8,11 +8,17 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
+#include <array>
 #include "viewporteffect.h"
 #include "framebuffer.h"
 #include "render.h"
 #include "shadermanager.h"
 #include "mapmanager.h"
+
+namespace gl = celestia::gl;
+namespace util = celestia::util;
+
+static const Renderer::PipelineState ps;
 
 bool ViewportEffect::preprocess(Renderer* renderer, FramebufferObject* fbo)
 {
@@ -36,42 +42,35 @@ bool ViewportEffect::distortXY(float &x, float &y)
 }
 
 PassthroughViewportEffect::PassthroughViewportEffect() :
-    ViewportEffect(),
-    vo(GL_ARRAY_BUFFER, 0, GL_STATIC_DRAW)
+    ViewportEffect()
 {
-}
-
-bool PassthroughViewportEffect::prerender(Renderer* renderer, FramebufferObject* fbo)
-{
-    if (!ViewportEffect::prerender(renderer, fbo))
-        return false;
-
-    renderer->disableDepthTest();
-    return true;
 }
 
 bool PassthroughViewportEffect::render(Renderer* renderer, FramebufferObject* fbo, int width, int height)
 {
-    CelestiaGLProgram *prog = renderer->getShaderManager().getShader("passthrough");
+    auto *prog = renderer->getShaderManager().getShader("passthrough");
     if (prog == nullptr)
         return false;
 
-    vo.bind();
-    if (!vo.initialized())
-        initializeVO(vo);
+    initialize();
 
     prog->use();
     prog->samplerParam("tex") = 0;
     glBindTexture(GL_TEXTURE_2D, fbo->colorTexture());
-    draw(vo);
+    renderer->setPipelineState(ps);
+    vo.draw();
     glBindTexture(GL_TEXTURE_2D, 0);
-    vo.unbind();
+
     return true;
 }
 
-void PassthroughViewportEffect::initializeVO(celgl::VertexObject& vo)
+void PassthroughViewportEffect::initialize()
 {
-    static float quadVertices[] = {
+    if (initialized)
+        return;
+    initialized = true;
+
+    static std::array quadVertices = {
         // positions   // texCoords
         -1.0f,  1.0f,  0.0f, 1.0f,
         -1.0f, -1.0f,  0.0f, 0.0f,
@@ -81,19 +80,31 @@ void PassthroughViewportEffect::initializeVO(celgl::VertexObject& vo)
          1.0f, -1.0f,  1.0f, 0.0f,
          1.0f,  1.0f,  1.0f, 1.0f
     };
-    vo.allocate(sizeof(quadVertices), quadVertices);
-    vo.setVertices(2, GL_FLOAT, false, 4 * sizeof(float), 0);
-    vo.setTextureCoords(2, GL_FLOAT, false, 4 * sizeof(float), 2 * sizeof(float));
-}
 
-void PassthroughViewportEffect::draw(celgl::VertexObject& vo)
-{
-    vo.draw(GL_TRIANGLES, 6);
+    vo = gl::VertexObject();
+    bo = gl::Buffer(gl::Buffer::TargetHint::Array, quadVertices, gl::Buffer::BufferUsage::StaticDraw);
+
+    vo.setCount(6);
+    vo.addVertexBuffer(
+        bo,
+        CelestiaGLProgram::VertexCoordAttributeIndex,
+        2,
+        gl::VertexObject::DataType::Float,
+        false,
+        4 * sizeof(float),
+        0);
+    vo.addVertexBuffer(
+        bo,
+        CelestiaGLProgram::TextureCoord0AttributeIndex,
+        2,
+        gl::VertexObject::DataType::Float,
+        false,
+        4 * sizeof(float),
+        2 * sizeof(float));
 }
 
 WarpMeshViewportEffect::WarpMeshViewportEffect(WarpMesh *mesh) :
     ViewportEffect(),
-    vo(GL_ARRAY_BUFFER, 0, GL_STATIC_DRAW),
     mesh(mesh)
 {
 }
@@ -103,46 +114,64 @@ bool WarpMeshViewportEffect::prerender(Renderer* renderer, FramebufferObject* fb
     if (mesh == nullptr)
         return false;
 
-    if (!ViewportEffect::prerender(renderer, fbo))
-        return false;
-
-    renderer->disableDepthTest();
-    return true;
+    return ViewportEffect::prerender(renderer, fbo);
 }
 
 bool WarpMeshViewportEffect::render(Renderer* renderer, FramebufferObject* fbo, int width, int height)
 {
-    CelestiaGLProgram *prog = renderer->getShaderManager().getShader("warpmesh");
+    auto *prog = renderer->getShaderManager().getShader("warpmesh");
     if (prog == nullptr)
         return false;
 
-    vo.bind();
-    if (!vo.initialized())
-        initializeVO(vo);
+    initialize();
 
     prog->use();
     prog->samplerParam("tex") = 0;
     prog->floatParam("screenRatio") = (float)height / width;
     glBindTexture(GL_TEXTURE_2D, fbo->colorTexture());
-    draw(vo);
+    renderer->setPipelineState(ps);
+    vo.draw();
     glBindTexture(GL_TEXTURE_2D, 0);
-    vo.unbind();
+
     return true;
 }
 
-void WarpMeshViewportEffect::initializeVO(celgl::VertexObject& vo)
+void WarpMeshViewportEffect::initialize()
 {
-    mesh->scopedDataForRendering([&vo](float *data, int size){
-        vo.allocate(size, data);
-        vo.setVertices(2, GL_FLOAT, false, 5 * sizeof(float), 0);
-        vo.setTextureCoords(2, GL_FLOAT, false, 5 * sizeof(float), 2 * sizeof(float));
-        vo.setVertexAttribArray(CelestiaGLProgram::IntensityAttributeIndex, 1, GL_FLOAT, false, 5 * sizeof(float), 4 * sizeof(float));
-    });
-}
+    if (initialized)
+        return;
+    initialized = true;
 
-void WarpMeshViewportEffect::draw(celgl::VertexObject& vo)
-{
-    vo.draw(GL_TRIANGLES, mesh->count());
+    vo = gl::VertexObject();
+    bo = gl::Buffer();
+
+    bo.setData(mesh->scopedDataForRendering(), gl::Buffer::BufferUsage::StaticDraw);
+
+    vo.setCount(mesh->count());
+    vo.addVertexBuffer(
+        bo,
+        CelestiaGLProgram::VertexCoordAttributeIndex,
+        2,
+        gl::VertexObject::DataType::Float,
+        false,
+        5 * sizeof(float),
+        0);
+    vo.addVertexBuffer(
+        bo,
+        CelestiaGLProgram::TextureCoord0AttributeIndex,
+        2,
+        gl::VertexObject::DataType::Float,
+        false,
+        5 * sizeof(float),
+        2 * sizeof(float));
+    vo.addVertexBuffer(
+        bo,
+        CelestiaGLProgram::IntensityAttributeIndex,
+        1,
+        gl::VertexObject::DataType::Float,
+        false,
+        5 * sizeof(float),
+        4 * sizeof(float));
 }
 
 bool WarpMeshViewportEffect::distortXY(float &x, float &y)
@@ -152,10 +181,10 @@ bool WarpMeshViewportEffect::distortXY(float &x, float &y)
 
     float u;
     float v;
-    if (!mesh->mapVertex(x * 2, y * 2, &u, &v))
+    if (!mesh->mapVertex(x * 2.0f, y * 2.0f, &u, &v))
         return false;
 
-    x = u / 2;
-    y = v / 2;
+    x = u / 2.0f;
+    y = v / 2.0f;
     return true;
 }

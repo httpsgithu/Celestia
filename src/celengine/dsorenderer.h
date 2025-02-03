@@ -1,6 +1,6 @@
 // dsorenderer.h
 //
-// Copyright (C) 2001-2020, the Celestia Development Team
+// Copyright (C) 2001-present, the Celestia Development Team
 // Original version by Chris Laurel <claurel@gmail.com>
 //
 // This program is free software; you can redistribute it and/or
@@ -10,27 +10,40 @@
 
 #pragma once
 
+#include <cstdint>
+#include <memory>
+
 #include <Eigen/Core>
+
 #include <celmath/frustum.h>
+#include <celmath/mathlib.h>
+#include <celrender/rendererfwd.h>
 #include "objectrenderer.h"
+#include "projectionmode.h"
 
 class DeepSkyObject;
+class DSODatabase;
 
-class DSORenderer : public ObjectRenderer<DeepSkyObject*, double>
+class DSORenderer : public ObjectRenderer<std::unique_ptr<DeepSkyObject>, double>
 {
- public:
+public:
     DSORenderer();
 
-    void process(DeepSkyObject* const &, double, float);
+    void process(const std::unique_ptr<DeepSkyObject>&, double, float) override; //NOSONAR
 
- public:
-    Eigen::Vector3d     obsPos;
-    Eigen::Matrix3f     orientationMatrix;
-    celmath::Frustum    frustum         { 45.0_deg, 1.0f, 1.0f };
-    DSODatabase*        dsoDB           { nullptr };
+    celestia::math::InfiniteFrustum frustum{ celestia::math::degToRad(celestia::engine::standardFOV),
+                                             1.0f,
+                                             1.0f };
 
-    int                 wWidth          { 0 };
-    int                 wHeight         { 0 };
-    double              avgAbsMag       { 0.0 };
-    uint32_t            dsosProcessed   { 0 };
+    Eigen::Vector3d obsPos;
+    Eigen::Matrix3f orientationMatrixT;
+    DSODatabase    *dsoDB{ nullptr };
+
+    float         avgAbsMag{ 0.0f };
+    std::uint32_t dsosProcessed{ 0 };
+
+    celestia::render::GalaxyRenderer      *galaxyRenderer{ nullptr };
+    celestia::render::GlobularRenderer    *globularRenderer{ nullptr };
+    celestia::render::NebulaRenderer      *nebulaRenderer{ nullptr };
+    celestia::render::OpenClusterRenderer *openClusterRenderer{ nullptr };
 };

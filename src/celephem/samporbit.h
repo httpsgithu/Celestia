@@ -7,27 +7,31 @@
 // as published by the Free Software Foundation; either version 2
 // of the License, or (at your option) any later version.
 
-#ifndef _CELENGINE_SAMPORBIT_H_
-#define _CELENGINE_SAMPORBIT_H_
+#pragma once
 
-#include "orbit.h"
+#include <memory>
+
 #include <celcompat/filesystem.h>
 
-enum TrajectoryInterpolation
+namespace celestia::ephem
 {
-    TrajectoryInterpolationLinear,
-    TrajectoryInterpolationCubic,
+
+class Orbit;
+
+enum class TrajectoryInterpolation
+{
+    Linear,
+    Cubic,
 };
 
-enum TrajectoryPrecision
+enum class TrajectoryPrecision
 {
-    TrajectoryPrecisionSingle,
-    TrajectoryPrecisionDouble
+    Single,
+    Double,
 };
 
-extern Orbit* LoadSampledTrajectoryDoublePrec(const fs::path& filename, TrajectoryInterpolation interpolation);
-extern Orbit* LoadSampledTrajectorySinglePrec(const fs::path& filename, TrajectoryInterpolation interpolation);
-extern Orbit* LoadXYZVTrajectoryDoublePrec(const fs::path& filename, TrajectoryInterpolation interpolation);
-extern Orbit* LoadXYZVTrajectorySinglePrec(const fs::path& filename, TrajectoryInterpolation interpolation);
+std::shared_ptr<const Orbit> LoadSampledTrajectory(const fs::path&,
+                                                   TrajectoryInterpolation,
+                                                   TrajectoryPrecision);
 
-#endif // _CELENGINE_SAMPORBIT_H_
+} // end namespace celestia::ephem
